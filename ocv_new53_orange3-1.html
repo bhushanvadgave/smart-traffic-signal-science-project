@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Smart Traffic Signal</title>
+<style>
+  :root { --bg:#071430; --panel:#071029; --muted:#9fb0c8; --accent:#2dd4bf; --danger:#fb7185; }
+  html,body{height:100%;margin:0;font-family:system-ui, -apple-system, Roboto, Arial;background:var(--bg);color:#e6eef8;}
+  #stage{height:100%;padding:12px;box-sizing:border-box;display:flex;flex-direction:column;gap:10px;}
+  header{display:flex;justify-content:space-between;align-items:center;}
+  h2{margin:0;font-size:18px;}
+  .top-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .panel{background:var(--panel);padding:10px;border-radius:10px;box-sizing:border-box;}
+  .buttons, .serialControls, .zoomControls {display:flex;gap:8px;align-items:center;}
+  button{padding:8px 12px;border-radius:8px;border:none;background:#0f172a;color:#fff;font-weight:700;cursor:pointer;}
+  #content{display:flex;gap:12px;align-items:flex-start;height:calc(100% - 200px);}
+  .main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;}
+  .sidebar{width:240px;display:flex;flex-direction:column;gap:8px;}
+  canvas{display:block;border-radius:8px;background:#000;}
+  video{display:none;}
+  .controls { display:flex; gap:12px; align-items:center; margin-top:8px; flex-wrap:wrap; width:100%; }
+  .sliders { display:flex; gap:12px; flex-direction:column; width:100%; }
+  label{font-size:13px;color:var(--muted);}
+  input[type=range]{width:100%;}
+  .stats-col{display:flex;flex-direction:column;gap:8px;}
+  .stat-row{background:rgba(255,255,255,0.03);padding:8px 10px;border-radius:8px;font-weight:700;color:var(--muted);}
+  .stat-row .title{font-weight:900;color:#fff;margin-bottom:6px;}
+  #serialLog{background:#031226;color:var(--muted);padding:8px;border-radius:8px;height:140px;overflow:auto;font-family:monospace;font-size:12px;white-space:pre-wrap;}
+  .hint{font-size:12px;color:#cfe7ff;opacity:0.95;}
+  .footer{font-size:12px;color:var(--muted);text-align:center;}
+  .statusDot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle;}
+  .green{background:var(--accent);} .red{background:var(--danger);}
+  /* ensure canvas never overflows window height */
+  #canvasDebug{max-height:90vh;width:auto;height:auto;margin:8px 0;}
+</style>
+</head>
+<body>
+  <div id="stage">
+    <header>
+      <h2>Smart Traffic Signal - by Dinvyansh Sharma</h2>
+      <div class="top-row">
+        <div class="buttons panel">
+          <button id="startBtn" disabled>Start Camera (waiting OpenCV)</button>
+          <button id="stopBtn" disabled>Stop</button>
+          <button id="snapBtn">Save Snapshot</button>
+          <button id="toggleMaskBtn">Show Mask</button>
+        </div>
+        <div class="serialControls panel">
+          <button id="connectSerialBtn">Connect to Arduino</button>
+          <button id="disconnectSerialBtn" disabled>Disconnect</button>
+          <div style="display:flex;align-items:center;color:var(--muted);margin-left:8px;">
+            <span id="statusDot" class="statusDot red"></span>
+            <span id="statusText">Serial: disconnected</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div id="content">
+      <!-- Left: camera & controls -->
+      <div class="main panel" id="mainPanel">
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvasDebug"></canvas>
+        <canvas id="canvasMask" style="display:none"></canvas>
+
+        <div class="controls">
+          <div class="zoomControls">
+            <button id="zoomOutBtn">-</button>
+            <input id="zoomSlider" type="range" min="1" max="1" step="0.1" value="1" disabled />
+            <button id="zoomInBtn">+</button>
+          </div>
+
+          <div class="sliders" style="max-width:820px;">
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+              <div style="flex:1;min-width:220px;">
+                <label>Threshold: <span id="valThresh">110</span></label>
+                <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+              </div>
+              <div style="flex:1;min-width:220px;">
+                <label>Blur (odd): <span id="valBlur">5</span></label>
+                <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+              </div>
+              <div style="flex:1;min-width:220px;">
+                <label>Morph: <span id="valMorph">5</span></label>
+                <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+              </div>
+              <div style="flex:1;min-width:220px;">
+                <label>Min area: <span id="valArea">500</span></label>
+                <input id="sliderArea" type="range" min="20" max="8000" step="10" value="500" />
+              </div>
+            </div>
+
+            <hr style="opacity:0.06;margin:8px 0;">
+
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+              <div style="flex:1;min-width:140px">
+                <label>Hue Min: <span id="valHueMin">5</span></label>
+                <input id="sliderHueMin" type="range" min="0" max="179" value="5" />
+              </div>
+              <div style="flex:1;min-width:140px">
+                <label>Hue Max: <span id="valHueMax">25</span></label>
+                <input id="sliderHueMax" type="range" min="0" max="179" value="25" />
+              </div>
+              <div style="flex:1;min-width:140px">
+                <label>Sat Min: <span id="valSatMin">120</span></label>
+                <input id="sliderSatMin" type="range" min="0" max="255" value="120" />
+              </div>
+              <div style="flex:1;min-width:140px">
+                <label>Sat Max: <span id="valSatMax">255</span></label>
+                <input id="sliderSatMax" type="range" min="0" max="255" value="255" />
+              </div>
+              <div style="flex:1;min-width:140px">
+                <label>Val Min: <span id="valValMin">120</span></label>
+                <input id="sliderValMin" type="range" min="0" max="255" value="120" />
+              </div>
+              <div style="flex:1;min-width:140px">
+                <label>Val Max: <span id="valValMax">255</span></label>
+                <input id="sliderValMax" type="range" min="0" max="255" value="255" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: stats & serial -->
+      <aside class="sidebar">
+        <div class="panel">
+          <div style="font-weight:900;color:#fff;margin-bottom:6px;">Quadrant Stats</div>
+          <div class="stats-col">
+            <div class="stat-row"><div class="title">A (top-right)</div><div class="small">Cars: <span id="carsA">0</span></div><div class="small">Amb: <span id="ambA">0</span></div></div>
+            <div class="stat-row"><div class="title">B (bottom-right)</div><div class="small">Cars: <span id="carsB">0</span></div><div class="small">Amb: <span id="ambB">0</span></div></div>
+            <div class="stat-row"><div class="title">C (bottom-left)</div><div class="small">Cars: <span id="carsC">0</span></div><div class="small">Amb: <span id="ambC">0</span></div></div>
+            <div class="stat-row"><div class="title">D (top-left)</div><div class="small">Cars: <span id="carsD">0</span></div><div class="small">Amb: <span id="ambD">0</span></div></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div style="font-weight:900;color:#fff;margin-bottom:6px;">Serial Log</div>
+          <div id="serialLog">TX and ACK messages will appear here...</div>
+        </div>
+
+        <div class="panel">
+          <div class="hint">Tip: white background, steady lighting. Use zoom only if needed.</div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- <div class="footer">Serve over HTTPS or localhost. Web Serial works best on Desktop Chrome.</div> -->
+  </div>
+
+<!-- OpenCV -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+/* Full-featured page:
+   - DPR-correct drawing (no stretching)
+   - canvas sizing fits both width and height constraints and accounts for sidebar width
+   - dark (cars) detection via threshold+morph
+   - orange (ambulance) detection via HSV with sliders
+   - quadrant lines, labels, counts drawn on debug canvas
+   - stats sidebar updated
+   - Web Serial debounced TX of 8 numbers (cars A..D, amb A..D)
+   - only TX and ACK logged in serialLog
+   - zoom in/out if track supports it
+*/
+
+// DOM refs
+const video = document.getElementById('video');
+const canvasDebug = document.getElementById('canvasDebug');
+const canvasMask = document.getElementById('canvasMask');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const snapBtn = document.getElementById('snapBtn');
+const toggleMaskBtn = document.getElementById('toggleMaskBtn');
+
+const zoomSlider = document.getElementById('zoomSlider');
+const zoomInBtn = document.getElementById('zoomInBtn');
+const zoomOutBtn = document.getElementById('zoomOutBtn');
+
+const sliderThresh = document.getElementById('sliderThresh');
+const sliderBlur = document.getElementById('sliderBlur');
+const sliderMorph = document.getElementById('sliderMorph');
+const sliderArea = document.getElementById('sliderArea');
+
+const sliderHueMin = document.getElementById('sliderHueMin');
+const sliderHueMax = document.getElementById('sliderHueMax');
+const sliderSatMin = document.getElementById('sliderSatMin');
+const sliderSatMax = document.getElementById('sliderSatMax');
+const sliderValMin = document.getElementById('sliderValMin');
+const sliderValMax = document.getElementById('sliderValMax');
+
+const valThresh = document.getElementById('valThresh');
+const valBlur = document.getElementById('valBlur');
+const valMorph = document.getElementById('valMorph');
+const valArea = document.getElementById('valArea');
+const valHueMin = document.getElementById('valHueMin');
+const valHueMax = document.getElementById('valHueMax');
+const valSatMin = document.getElementById('valSatMin');
+const valSatMax = document.getElementById('valSatMax');
+const valValMin = document.getElementById('valValMin');
+const valValMax = document.getElementById('valValMax');
+
+const serialLog = document.getElementById('serialLog');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+const carsA = document.getElementById('carsA'), carsB = document.getElementById('carsB'), carsC = document.getElementById('carsC'), carsD = document.getElementById('carsD');
+const ambA = document.getElementById('ambA'), ambB = document.getElementById('ambB'), ambC = document.getElementById('ambC'), ambD = document.getElementById('ambD');
+
+let OFF_WIDTH = 1280, OFF_HEIGHT = 720;
+const offCanvas = document.createElement('canvas');
+const offCtx = offCanvas.getContext('2d');
+
+let srcMat, grayMat, blurMat, maskMat, morphMat, hsvMat, orangeMask, orangeMorph, contours, hierarchy;
+let cameraTrack = null, streaming = false, intervalId = null;
+let openCvLoaded = false;
+
+// Serial state
+let port = null, writer = null, reader = null, keepReading = false;
+let rxBuffer = '';
+let lastSentCounts = Array(8).fill(-1);
+let desiredCounts = Array(8).fill(-1);
+let pendingSendTimeout = null;
+const SEND_DEBOUNCE_MS = 300;
+const ACK_PATTERNS = [/^\s*OK\b/i, /^\s*ACK\b/i];
+
+// slider UI init
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+valHueMin.innerText = sliderHueMin.value;
+valHueMax.innerText = sliderHueMax.value;
+valSatMin.innerText = sliderSatMin.value;
+valSatMax.innerText = sliderSatMax.value;
+valValMin.innerText = sliderValMin.value;
+valValMax.innerText = sliderValMax.value;
+
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { let v = parseInt(sliderBlur.value); if (v % 2 === 0) sliderBlur.value = v+1; valBlur.innerText = sliderBlur.value; };
+sliderMorph.oninput = () => { let v = parseInt(sliderMorph.value); if (v % 2 === 0) sliderMorph.value = v+1; valMorph.innerText = sliderMorph.value; };
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+sliderHueMin.oninput = () => valHueMin.innerText = sliderHueMin.value;
+sliderHueMax.oninput = () => valHueMax.innerText = sliderHueMax.value;
+sliderSatMin.oninput = () => valSatMin.innerText = sliderSatMin.value;
+sliderSatMax.oninput = () => valSatMax.innerText = sliderSatMax.value;
+sliderValMin.oninput = () => valValMin.innerText = sliderValMin.value;
+sliderValMax.oninput = () => valValMax.innerText = sliderValMax.value;
+
+// OpenCV load handlers
+function onOpenCvReady() {
+  openCvLoaded = true;
+  startBtn.disabled = false;
+  startBtn.innerText = 'Start Camera';
+  appendLog('OpenCV.js loaded');
+}
+function onOpenCvError() {
+  alert('Failed to load OpenCV.js');
+  appendLog('OpenCV load error');
+}
+
+// Start camera and create mats, plus size canvas to fit left area (account for sidebar)
+async function startCamera() {
+  if (!openCvLoaded || streaming) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false});
+    video.srcObject = stream;
+    cameraTrack = stream.getVideoTracks()[0];
+    await video.play();
+    // small pause to get resolution
+    await new Promise(r => setTimeout(r, 150));
+    OFF_WIDTH = video.videoWidth || OFF_WIDTH;
+    OFF_HEIGHT = video.videoHeight || OFF_HEIGHT;
+    offCanvas.width = OFF_WIDTH; offCanvas.height = OFF_HEIGHT;
+
+    // compute CSS canvas size so it fits both width & height and leaves sidebar space
+    const DPR = window.devicePixelRatio || 1;
+    const sidebarWidth = document.querySelector('.sidebar').offsetWidth || 240;
+    // available width for canvas area (content inner width minus sidebar and gaps)
+    const availableWidth = Math.max(200, window.innerWidth - sidebarWidth - 60); // leave some margin
+    const maxCssW = Math.floor(availableWidth * 0.95); // occupy up to 95% of available
+    const maxCssH = Math.floor(window.innerHeight * 0.9);
+    let cssW = maxCssW;
+    let cssH = Math.round(cssW * (OFF_HEIGHT / OFF_WIDTH));
+    if (cssH > maxCssH) {
+      cssH = maxCssH;
+      cssW = Math.round(cssH * (OFF_WIDTH / OFF_HEIGHT));
+    }
+
+    // backing store sizing
+    canvasDebug.width = Math.round(OFF_WIDTH * DPR);
+    canvasDebug.height = Math.round(OFF_HEIGHT * DPR);
+    // display size
+    canvasDebug.style.width = cssW + 'px';
+    canvasDebug.style.height = cssH + 'px';
+
+    // mask canvas same CSS/backing if used
+    canvasMask.width = canvasDebug.width;
+    canvasMask.height = canvasDebug.height;
+    canvasMask.style.width = canvasDebug.style.width;
+    canvasMask.style.height = canvasDebug.style.height;
+
+    // create mats (OFF dims)
+    srcMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC4);
+    grayMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    blurMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    maskMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    morphMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    hsvMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC3);
+    orangeMask = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    orangeMorph = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+
+    // setup zoom slider if supported
+    if (cameraTrack && cameraTrack.getCapabilities) {
+      try {
+        const caps = cameraTrack.getCapabilities();
+        if ('zoom' in caps) {
+          zoomSlider.min = caps.zoom.min; zoomSlider.max = caps.zoom.max; zoomSlider.step = (caps.zoom.step || 0.1);
+          zoomSlider.value = (cameraTrack.getSettings().zoom !== undefined) ? cameraTrack.getSettings().zoom : caps.zoom.min;
+          zoomSlider.disabled = false;
+        } else { zoomSlider.disabled = true; }
+      } catch (err) { console.warn('zoom setup failed', err); zoomSlider.disabled = true; }
+    }
+
+    streaming = true;
+    startBtn.disabled = true; stopBtn.disabled = false;
+    intervalId = setInterval(processFrame, 100); // ~10 FPS
+  } catch (err) {
+    alert('Could not start camera: ' + err.message);
+    appendLog('Camera error: ' + err.message);
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  streaming = false;
+  startBtn.disabled = false; stopBtn.disabled = true;
+  clearInterval(intervalId);
+  try {
+    if (video && video.srcObject) {
+      const tracks = video.srcObject.getTracks();
+      tracks.forEach(t => t.stop());
+      video.srcObject = null;
+    }
+  } catch (e) { console.warn(e); }
+  try { srcMat.delete(); grayMat.delete(); blurMat.delete(); maskMat.delete(); morphMat.delete(); hsvMat.delete(); orangeMask.delete(); orangeMorph.delete(); contours.delete(); hierarchy.delete(); } catch(e){}
+}
+
+// zoom helpers
+zoomInBtn.addEventListener('click', async () => {
+  if (!cameraTrack) return;
+  let v = parseFloat(zoomSlider.value) + parseFloat(zoomSlider.step || 0.1);
+  await setZoom(v);
+});
+zoomOutBtn.addEventListener('click', async () => {
+  if (!cameraTrack) return;
+  let v = parseFloat(zoomSlider.value) - parseFloat(zoomSlider.step || 0.1);
+  await setZoom(v);
+});
+zoomSlider.addEventListener('input', async () => { await setZoom(parseFloat(zoomSlider.value)); });
+
+async function setZoom(val) {
+  if (!cameraTrack || !cameraTrack.getCapabilities) return;
+  const caps = cameraTrack.getCapabilities();
+  if (!('zoom' in caps)) return;
+  val = Math.max(caps.zoom.min, Math.min(caps.zoom.max, val));
+  try { await cameraTrack.applyConstraints({ advanced: [{ zoom: val }] }); zoomSlider.value = val; appendLog('Zoom set: ' + val); }
+  catch (err) { console.warn('zoom apply error', err); }
+}
+
+// mask toggle
+toggleMaskBtn.addEventListener('click', () => {
+  if (canvasMask.style.display === 'none' || canvasMask.style.display === '') { canvasMask.style.display = 'block'; toggleMaskBtn.innerText = 'Hide Mask'; }
+  else { canvasMask.style.display = 'none'; toggleMaskBtn.innerText = 'Show Mask'; }
+});
+
+// process frame: detect dark objects & orange objects, draw overlays
+function processFrame() {
+  if (!streaming) return;
+  // capture at OFF resolution to offCanvas
+  offCtx.drawImage(video, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+  const img = offCtx.getImageData(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  srcMat.data.set(img.data);
+
+  // dark (cars) pipeline: gray -> blur -> threshold -> morph
+  cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+  let ksz = parseInt(sliderBlur.value) || 5; if (ksz % 2 === 0) ksz++;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksz, ksz), 0);
+  let thresh = parseInt(sliderThresh.value) || 110;
+  cv.threshold(blurMat, maskMat, thresh, 255, cv.THRESH_BINARY_INV);
+  let morphK = parseInt(sliderMorph.value) || 5; if (morphK % 2 === 0) morphK++;
+  const M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+  cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, M);
+  cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, M);
+
+  // orange pipeline: RGB -> HSV -> inRange -> morph
+  cv.cvtColor(srcMat, hsvMat, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
+  const low = new cv.Mat(hsvMat.rows, hsvMat.cols, hsvMat.type(), [parseInt(sliderHueMin.value), parseInt(sliderSatMin.value), parseInt(sliderValMin.value), 0]);
+  const high = new cv.Mat(hsvMat.rows, hsvMat.cols, hsvMat.type(), [parseInt(sliderHueMax.value), parseInt(sliderSatMax.value), parseInt(sliderValMax.value), 255]);
+  cv.inRange(hsvMat, low, high, orangeMask);
+  low.delete(); high.delete();
+  cv.morphologyEx(orangeMask, orangeMorph, cv.MORPH_OPEN, M);
+  cv.morphologyEx(orangeMorph, orangeMorph, cv.MORPH_CLOSE, M);
+
+  // optional mask display
+  if (canvasMask.style.display !== 'none') {
+    try { cv.imshow(canvasMask, morphMat); } catch (e) { /* ignore */ }
+  }
+
+  // draw original capture + overlays on debug canvas
+  const dctx = canvasDebug.getContext('2d');
+  const DPR = window.devicePixelRatio || 1;
+  dctx.setTransform(DPR, 0, 0, DPR, 0, 0); // map drawing to OFF coordinate space
+  dctx.clearRect(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  dctx.drawImage(offCanvas, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+
+  const midX = Math.round(OFF_WIDTH / 2), midY = Math.round(OFF_HEIGHT / 2);
+  const minArea = Math.max(10, parseInt(sliderArea.value) || 100);
+  let darkCounts = [0,0,0,0], orangeCounts = [0,0,0,0];
+
+  // detect dark objects
+  cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  for (let i = 0; i < contours.size(); ++i) {
+    let cnt = contours.get(i);
+    let area = cv.contourArea(cnt);
+    if (area >= minArea) {
+      const r = cv.boundingRect(cnt);
+      const cx = r.x + r.width/2, cy = r.y + r.height/2;
+      if (cx >= midX && cy < midY) darkCounts[0]++; else if (cx >= midX && cy >= midY) darkCounts[1]++;
+      else if (cx < midX && cy >= midY) darkCounts[2]++; else darkCounts[3]++;
+      dctx.strokeStyle = 'lime'; dctx.lineWidth = Math.max(1, Math.round(OFF_WIDTH/500)); dctx.strokeRect(r.x, r.y, r.width, r.height);
+      dctx.fillStyle = 'yellow'; dctx.beginPath(); dctx.arc(cx, cy, Math.max(3,Math.round(OFF_WIDTH/300)), 0, Math.PI*2); dctx.fill();
+    }
+    cnt.delete();
+  }
+
+  // detect orange objects
+  cv.findContours(orangeMorph, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  for (let i = 0; i < contours.size(); ++i) {
+    let cnt = contours.get(i);
+    let area = cv.contourArea(cnt);
+    if (area >= minArea) {
+      const r = cv.boundingRect(cnt);
+      const cx = r.x + r.width/2, cy = r.y + r.height/2;
+      if (cx >= midX && cy < midY) orangeCounts[0]++; else if (cx >= midX && cy >= midY) orangeCounts[1]++;
+      else if (cx < midX && cy >= midY) orangeCounts[2]++; else orangeCounts[3]++;
+      dctx.strokeStyle = 'red'; dctx.lineWidth = Math.max(2, Math.round(OFF_WIDTH/200)); dctx.strokeRect(r.x, r.y, r.width, r.height);
+      dctx.fillStyle = 'red'; dctx.beginPath(); dctx.arc(cx, cy, Math.max(3,Math.round(OFF_WIDTH/300)), 0, Math.PI*2); dctx.fill();
+    }
+    cnt.delete();
+  }
+
+  // draw quadrant lines and labels (black)
+  dctx.strokeStyle = 'black'; dctx.lineWidth = Math.max(2, Math.round(OFF_WIDTH/400));
+  dctx.beginPath(); dctx.moveTo(midX, 0); dctx.lineTo(midX, OFF_HEIGHT); dctx.moveTo(0, midY); dctx.lineTo(OFF_WIDTH, midY); dctx.stroke();
+  dctx.fillStyle = 'black'; dctx.font = `bold ${Math.max(12, Math.round(OFF_WIDTH/32))}px sans-serif`;
+  const qHalfW = Math.round(OFF_WIDTH/4), qHalfH = Math.round(OFF_HEIGHT/4);
+  dctx.fillText('A', midX + qHalfW - 12, qHalfH + 12);
+  dctx.fillText('B', midX + qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('C', qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('D', qHalfW - 12, qHalfH + 12);
+  
+  // dctx.fillText('A', Math.round(OFF_WIDTH) - 90, Math.round(OFF_HEIGHT)/2 - 20);
+  // dctx.fillText('B', midX + qHalfW - 12, midY + qHalfH + 12);
+  // dctx.fillText('C', qHalfW - 12, midY + qHalfH + 12);
+  // dctx.fillText('D', qHalfW - 12, qHalfH + 12);
+
+  // draw counts inside each quadrant, not overlapping
+  function drawCounts(quadrant, cars, amb) {
+    dctx.font = `${Math.max(14, Math.round(OFF_WIDTH/55))}px sans-serif`;
+    dctx.textBaseline = "top";
+
+    let x = 0, y = 0;
+    const margin = 10;
+
+    if (quadrant === 'A') { // top-right
+      // x = midX + margin;
+      // y = margin;
+      // x = midX + margin + qHalfW +90;
+      x = Math.round(OFF_WIDTH) - 60
+      // y = midY - margin-30;
+      y = Math.round(OFF_HEIGHT)/2 - margin-30;
+    } else if (quadrant === 'B') { // bottom-right
+      // x = midX + margin + qHalfW +90;
+      x = Math.round(OFF_WIDTH) - 60
+      // y = midY + margin;
+      y = Math.round(OFF_HEIGHT)/2 +10;
+    } else if (quadrant === 'C') { // bottom-left
+      x = margin;
+      // y = midY + margin;
+      y = Math.round(OFF_HEIGHT)/2 +10;
+    } else if (quadrant === 'D') { // top-left
+      // x = margin;
+      // y = margin;
+       x = margin;
+      // y = midY - margin-30;
+      y = Math.round(OFF_HEIGHT)/2 - margin-30;
+    }
+
+    dctx.fillStyle = 'green';
+    dctx.fillText(`Cars: ${cars}`, x, y);
+    dctx.fillStyle = 'red';
+    dctx.fillText(`Amb: ${amb}`, x, y + 18); // 18px lower for separation
+  }
+
+  // call per quadrant
+  drawCounts('A', darkCounts[0], orangeCounts[0]);
+  drawCounts('B', darkCounts[1], orangeCounts[1]);
+  drawCounts('C', darkCounts[2], orangeCounts[2]);
+  drawCounts('D', darkCounts[3], orangeCounts[3]);
+
+
+  // update sidebar DOM
+  [carsA, carsB, carsC, carsD].forEach((el, i) => el.innerText = darkCounts[i]);
+  [ambA, ambB, ambC, ambD].forEach((el, i) => el.innerText = orangeCounts[i]);
+
+  // debounced serial send of 8 numbers (cars A..D, amb A..D)
+  const combined = [...darkCounts, ...orangeCounts];
+  const changed = combined.some((v, i) => v !== lastSentCounts[i]);
+  if (changed) {
+    desiredCounts = combined.slice();
+    if (!pendingSendTimeout) {
+      appendLog('Scheduling send...');
+      pendingSendTimeout = setTimeout(async () => {
+        await sendCounts(desiredCounts);
+        pendingSendTimeout = null;
+      }, SEND_DEBOUNCE_MS);
+    } else {
+      // just update desiredCounts silently (no spam)
+    }
+  }
+}
+
+// Serial helpers
+function appendLog(msg) {
+  const now = new Date().toLocaleTimeString();
+  serialLog.textContent += `[${now}] ${msg}\n`;
+  serialLog.scrollTop = serialLog.scrollHeight;
+  console.log('[LOG] ' + msg);
+}
+
+async function sendCounts(arr) {
+  if (!writer) {
+    appendLog('TX skipped (serial not connected)');
+    lastSentCounts = [...arr]; // avoid repeated scheduling while disconnected
+    return;
+  }
+  const payload = arr.join(',') + '\n';
+  try {
+    await writer.write(new TextEncoder().encode(payload));
+    appendLog('TX: ' + payload.trim());
+    lastSentCounts = [...arr];
+  } catch (err) {
+    appendLog('Write error: ' + err);
+    console.error(err);
+  }
+}
+
+// Web Serial connect/disconnect/read
+document.getElementById('connectSerialBtn').addEventListener('click', async () => {
+  if (!('serial' in navigator)) { alert('Web Serial not supported in this browser. Use desktop Chrome.'); return; }
+  try {
+    appendLog('Requesting serial port...');
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+    writer = port.writable.getWriter();
+    reader = port.readable.getReader();
+    keepReading = true;
+    readLoop().catch(e => console.warn('readLoop error', e));
+    document.getElementById('connectSerialBtn').disabled = true;
+    document.getElementById('disconnectSerialBtn').disabled = false;
+    statusDot.classList.replace('red', 'green'); statusText.textContent = 'Serial: connected';
+    appendLog('Port opened at 9600');
+  } catch (err) {
+    appendLog('Serial open error: ' + err);
+    console.error(err);
+  }
+});
+
+document.getElementById('disconnectSerialBtn').addEventListener('click', async () => {
+  try {
+    appendLog('Disconnecting serial...');
+    keepReading = false;
+    if (reader) { await reader.cancel(); reader.releaseLock(); reader = null; }
+    if (writer) { writer.releaseLock(); writer = null; }
+    if (port) { await port.close(); port = null; }
+    document.getElementById('connectSerialBtn').disabled = false;
+    document.getElementById('disconnectSerialBtn').disabled = true;
+    statusDot.classList.replace('green', 'red'); statusText.textContent = 'Serial: disconnected';
+    appendLog('Port closed');
+  } catch (err) {
+    appendLog('Disconnect error: ' + err);
+  }
+});
+
+async function readLoop() {
+  const dec = new TextDecoder();
+  try {
+    while (keepReading && reader) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        rxBuffer += dec.decode(value);
+        let nlIndex;
+        while ((nlIndex = rxBuffer.indexOf('\n')) !== -1) {
+          let line = rxBuffer.slice(0, nlIndex + 1);
+          rxBuffer = rxBuffer.slice(nlIndex + 1);
+          const trimmed = line.trim();
+          if (trimmed.length === 0) continue;
+          if (ACK_PATTERNS.some(rx => rx.test(trimmed))) {
+            appendLog('RX (ACK): ' + trimmed);
+          } else {
+            // ignore other telemetry to avoid spam
+            console.debug('Ignored RX:', trimmed);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    appendLog('Read error: ' + err);
+    console.error(err);
+  }
+}
+
+// snapshot
+snapBtn.addEventListener('click', () => {
+  try {
+    const a = document.createElement('a');
+    a.href = canvasDebug.toDataURL('image/png');
+    a.download = 'debug_' + Date.now() + '.png';
+    a.click();
+    appendLog('Snapshot saved');
+  } catch (e) { console.warn('Snapshot failed', e); }
+});
+
+// start/stop wiring
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+
+// cleanup
+window.addEventListener('beforeunload', () => {
+  stopCamera();
+  if (port) try { port.close(); } catch (e) {}
+});
+
+// expose onOpenCvReady for script tag
+window.onOpenCvReady = onOpenCvReady;
+window.onOpenCvError = onOpenCvError;
+</script>
+</body>
+</html>

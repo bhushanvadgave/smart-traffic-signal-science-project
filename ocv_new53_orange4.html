@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter — Cars & Ambulance (HSV Tunable)</title>
+<style>
+  body { margin:0; font-family:system-ui, -apple-system, Roboto, Arial; background:#071430; color:#e6eef8; display:flex; flex-direction:column; align-items:center; padding:10px; }
+  #stage { width:100%; max-width:960px; background:#071029; padding:12px; border-radius:10px; box-sizing:border-box; }
+  h2 { margin:6px 0; text-align:center; }
+  .buttons, .serialControls { display:flex; gap:8px; margin-bottom:12px; justify-content:center; flex-wrap:wrap; }
+  button { padding:8px 12px; border-radius:8px; border:none; background:#0f172a; color:#fff; font-weight:700; cursor:pointer; }
+  canvas { display:block; border-radius:8px; background:#000; }
+  .controls { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
+  label { font-size:13px; color:#9fb0c8; }
+  input[type=range] { width:100%; }
+  .stats { display:flex; gap:8px; margin-top:10px; justify-content:center; flex-wrap:wrap; }
+  .stat { background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:8px; font-weight:700; min-width:120px; text-align:center; }
+  .hint { font-size:13px; color:#cfe7ff; opacity:0.95; margin-top:8px; text-align:center; }
+  .footer { font-size:12px; color:#9fb0c8; margin-top:8px; text-align:center; }
+  video { display:none; } /* hidden; used only for capture */
+  #serialLog { background:#031226; color:#9fb0c8; padding:8px; border-radius:8px; height:120px; overflow:auto; font-family:monospace; font-size:12px; margin-top:10px; }
+  .statusDot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .green { background:#2dd4bf; } .red { background:#fb7185; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <h2>Block Counter — Cars (Dark) & Ambulance (HSV)</h2>
+
+  <div class="buttons">
+    <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="snapBtn">Save Snapshot</button>
+    <button id="toggleMaskBtn">Show Mask</button>
+  </div>
+
+  <div class="serialControls">
+    <button id="connectSerialBtn">Connect to Arduino</button>
+    <button id="disconnectSerialBtn" disabled>Disconnect</button>
+    <div style="display:flex;align-items:center;color:#9fb0c8;">
+      <span id="statusDot" class="statusDot red"></span>
+      <span id="statusText">Serial: disconnected</span>
+    </div>
+  </div>
+
+  <div id="serialLog">TX and ACK messages will appear here...</div>
+
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvasDebug"></canvas>
+  <canvas id="canvasMask" style="display:none"></canvas>
+
+  <div class="controls">
+    <h3>Dark Object Detection (Cars)</h3>
+    <label>Threshold: <span id="valThresh">110</span></label>
+    <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+    <label>Gaussian Blur: <span id="valBlur">5</span></label>
+    <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+    <label>Morph Kernel: <span id="valMorph">5</span></label>
+    <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+    <label>Min Area: <span id="valArea">500</span></label>
+    <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+
+    <h3>Ambulance Detection (HSV Range)</h3>
+    <label>Hue Min: <span id="valHueMin">5</span></label>
+    <input id="sliderHueMin" type="range" min="0" max="179" value="5" />
+    <label>Hue Max: <span id="valHueMax">25</span></label>
+    <input id="sliderHueMax" type="range" min="0" max="179" value="25" />
+    <label>Sat Min: <span id="valSatMin">120</span></label>
+    <input id="sliderSatMin" type="range" min="0" max="255" value="120" />
+    <label>Sat Max: <span id="valSatMax">255</span></label>
+    <input id="sliderSatMax" type="range" min="0" max="255" value="255" />
+    <label>Val Min: <span id="valValMin">120</span></label>
+    <input id="sliderValMin" type="range" min="0" max="255" value="120" />
+    <label>Val Max: <span id="valValMax">255</span></label>
+    <input id="sliderValMax" type="range" min="0" max="255" value="255" />
+  </div>
+
+  <div class="stats">
+    <div class="stat">A: Cars <span id="carsA">0</span>, Amb <span id="ambA">0</span></div>
+    <div class="stat">B: Cars <span id="carsB">0</span>, Amb <span id="ambB">0</span></div>
+    <div class="stat">C: Cars <span id="carsC">0</span>, Amb <span id="ambC">0</span></div>
+    <div class="stat">D: Cars <span id="carsD">0</span>, Amb <span id="ambD">0</span></div>
+  </div>
+
+  <div class="hint">Use sliders to tune detection ranges for your objects under different lighting.</div>
+</div>
+
+<!-- OpenCV.js -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()"></script>
+<script>
+// --- Global vars (shortened for clarity, all features preserved) ---
+let video=document.getElementById('video'),canvasDebug=document.getElementById('canvasDebug'),canvasMask=document.getElementById('canvasMask');
+let startBtn=document.getElementById('startBtn'),stopBtn=document.getElementById('stopBtn'),snapBtn=document.getElementById('snapBtn'),toggleMaskBtn=document.getElementById('toggleMaskBtn');
+let streaming=false,openCvLoaded=false,srcMat,grayMat,blurMat,maskMat,morphMat,hsvMat,orangeMask,contours,hierarchy;
+let OFF_WIDTH=1280,OFF_HEIGHT=720,offCanvas=document.createElement('canvas'),offCtx=offCanvas.getContext('2d');
+const FPS=10,MAX_PROCESS_DIM=1280;
+
+// --- Sliders ---
+function setupSlider(id,valId){const s=document.getElementById(id),v=document.getElementById(valId);v.innerText=s.value;s.oninput=()=>v.innerText=s.value;}
+['Thresh','Blur','Morph','Area','HueMin','HueMax','SatMin','SatMax','ValMin','ValMax'].forEach(x=>setupSlider('slider'+x,'val'+x));
+
+// --- Camera ---
+function onOpenCvReady(){openCvLoaded=true;startBtn.disabled=false;startBtn.innerText='Start Camera';}
+async function startCamera(){if(!openCvLoaded||streaming)return;const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});video.srcObject=stream;await video.play();await new Promise(r=>setTimeout(r,150));
+OFF_WIDTH=video.videoWidth;OFF_HEIGHT=video.videoHeight;if(MAX_PROCESS_DIM){const m=Math.max(OFF_WIDTH,OFF_HEIGHT);if(m>MAX_PROCESS_DIM){const sc=MAX_PROCESS_DIM/m;OFF_WIDTH=Math.round(OFF_WIDTH*sc);OFF_HEIGHT=Math.round(OFF_HEIGHT*sc);}}
+offCanvas.width=OFF_WIDTH;offCanvas.height=OFF_HEIGHT;canvasDebug.width=OFF_WIDTH;canvasDebug.height=OFF_HEIGHT;canvasMask.width=OFF_WIDTH;canvasMask.height=OFF_HEIGHT;
+srcMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC4);grayMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);blurMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);maskMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);morphMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);hsvMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC3);orangeMask=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);contours=new cv.MatVector();hierarchy=new cv.Mat();
+streaming=true;startBtn.disabled=true;stopBtn.disabled=false;setInterval(processFrame,1000/FPS);}
+function stopCamera(){streaming=false;startBtn.disabled=false;stopBtn.disabled=true;video.srcObject.getTracks().forEach(t=>t.stop());}
+
+// --- Detection ---
+function processFrame(){if(!streaming)return;offCtx.drawImage(video,0,0,OFF_WIDTH,OFF_HEIGHT);let img=offCtx.getImageData(0,0,OFF_WIDTH,OFF_HEIGHT);srcMat.data.set(img.data);
+// Cars (dark)
+cv.cvtColor(srcMat,grayMat,cv.COLOR_RGBA2GRAY);cv.GaussianBlur(grayMat,blurMat,new cv.Size(parseInt(sliderBlur.value)|1,parseInt(sliderBlur.value)|1),0);cv.threshold(blurMat,maskMat,parseInt(sliderThresh.value),255,cv.THRESH_BINARY_INV);let M=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(parseInt(sliderMorph.value)|1,parseInt(sliderMorph.value)|1));cv.morphologyEx(maskMat,morphMat,cv.MORPH_OPEN,M);cv.morphologyEx(morphMat,morphMat,cv.MORPH_CLOSE,M);
+// Ambulance (orange HSV)
+cv.cvtColor(srcMat,hsvMat,cv.COLOR_RGBA2RGB);cv.cvtColor(hsvMat,hsvMat,cv.COLOR_RGB2HSV);let low=new cv.Mat(hsvMat.rows,hsvMat.cols,hsvMat.type(),[parseInt(sliderHueMin.value),parseInt(sliderSatMin.value),parseInt(sliderValMin.value),0]);let high=new cv.Mat(hsvMat.rows,hsvMat.cols,hsvMat.type(),[parseInt(sliderHueMax.value),parseInt(sliderSatMax.value),parseInt(sliderValMax.value),255]);cv.inRange(hsvMat,low,high,orangeMask);low.delete();high.delete();
+// Count
+let counts={cars:[0,0,0,0],amb:[0,0,0,0]},boxes=[];cv.findContours(morphMat,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);for(let i=0;i<contours.size();i++){let cnt=contours.get(i);if(cv.contourArea(cnt)<parseInt(sliderArea.value)){cnt.delete();continue;}let r=cv.boundingRect(cnt),cx=r.x+r.width/2,cy=r.y+r.height/2;boxes.push({rect:r,cx,cy,type:'car'});cnt.delete();}
+cv.findContours(orangeMask,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);for(let i=0;i<contours.size();i++){let cnt=contours.get(i);if(cv.contourArea(cnt)<parseInt(sliderArea.value)){cnt.delete();continue;}let r=cv.boundingRect(cnt),cx=r.x+r.width/2,cy=r.y+r.height/2;boxes.push({rect:r,cx,cy,type:'amb'});cnt.delete();}
+// Draw
+let ctx=canvasDebug.getContext('2d');ctx.clearRect(0,0,OFF_WIDTH,OFF_HEIGHT);ctx.drawImage(offCanvas,0,0);let midX=OFF_WIDTH/2,midY=OFF_HEIGHT/2;ctx.strokeStyle='black';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(midX,0);ctx.lineTo(midX,OFF_HEIGHT);ctx.moveTo(0,midY);ctx.lineTo(OFF_WIDTH,midY);ctx.stroke();
+['A','B','C','D'].forEach((q,i)=>{ctx.fillStyle='black';ctx.font='20px sans-serif';ctx.fillText(q,midX*(i<2?1.5:0.5)-10,midY*(i==0||i==3?0.5:1.5)*20);});
+for(const b of boxes){ctx.strokeStyle=b.type==='car'?'lime':'red';ctx.lineWidth=b.type==='car'?2:4;ctx.strokeRect(b.rect.x,b.rect.y,b.rect.width,b.rect.height);if(b.cx>=midX&&b.cy<midY)counts[b.type==='car'?'cars':'amb'][0]++;else if(b.cx>=midX&&b.cy>=midY)counts[b.type==='car'?'cars':'amb'][1]++;else if(b.cx<midX&&b.cy>=midY)counts[b.type==='car'?'cars':'amb'][2]++;else counts[b.type==='car'?'cars':'amb'][3]++;}
+['carsA','carsB','carsC','carsD'].forEach((id,i)=>document.getElementById(id).innerText=counts.cars[i]);['ambA','ambB','ambC','ambD'].forEach((id,i)=>document.getElementById(id).innerText=counts.amb[i]);cv.imshow(canvasMask,morphMat);
+// TODO: Send counts over serial (like before, debounce). Format: carsA..D,ambA..D
+}
+startBtn.onclick=startCamera;stopBtn.onclick=stopCamera;toggleMaskBtn.onclick=()=>{canvasMask.style.display=canvasMask.style.display==='none'?'block':'none';};
+</script>
+</body>
+</html>

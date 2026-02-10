@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter — Portrait UI, Landscape Capture</title>
+<style>
+  body { margin:0; font-family:system-ui, -apple-system, Roboto, Arial; background:#071430; color:#e6eef8; display:flex; flex-direction:column; align-items:center; padding:10px; }
+  #stage { width:100%; max-width:960px; background:#071029; padding:12px; border-radius:10px; box-sizing:border-box; }
+  h2 { margin:6px 0; text-align:center; }
+  .buttons { display:flex; gap:8px; margin-bottom:12px; justify-content:center; flex-wrap:wrap; }
+  button, label.switch { padding:8px 12px; border-radius:8px; border:none; background:#0f172a; color:#fff; font-weight:700; cursor:pointer; }
+  .switchRow { display:flex; gap:8px; align-items:center; justify-content:center; margin-bottom:8px; }
+  .twocol { display:flex; flex-direction:column; gap:12px; }
+  canvas { display:block; border-radius:8px; background:#000; }
+  .controls { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+  label { font-size:13px; color:#9fb0c8; }
+  input[type=range] { width:100%; }
+  .stats { display:flex; gap:8px; margin-top:10px; justify-content:center; flex-wrap:wrap; }
+  .stat { background:rgba(255,255,255,0.03); padding:8px 10px; border-radius:8px; font-weight:700; min-width:90px; text-align:center; }
+  .hint { font-size:13px; color:#cfe7ff; opacity:0.95; margin-top:8px; text-align:center; }
+  .footer { font-size:12px; color:#9fb0c8; margin-top:8px; text-align:center; }
+  video { display:none; }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <h2>Block Counter — Portrait UI, Landscape Capture</h2>
+
+    <div class="buttons">
+      <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="snapBtn">Save Snapshot</button>
+    </div>
+
+    <div class="switchRow">
+      <label style="color:#cfe7ff">Force landscape capture</label>
+      <input id="forceLandscape" type="checkbox" checked />
+      <label style="color:#9fb0c8">(if checked, portrait camera streams will be rotated to landscape)</label>
+    </div>
+
+    <video id="video" playsinline autoplay muted></video>
+
+    <div class="twocol">
+      <div>
+        <canvas id="canvasMask"></canvas>
+        <div style="text-align:center;color:#9fb0c8;margin-top:6px">Mask (threshold + morph)</div>
+      </div>
+
+      <div>
+        <canvas id="canvasDebug"></canvas>
+        <div style="text-align:center;color:#9fb0c8;margin-top:6px">Debug overlay (landscape frame + boxes & quadrants)</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>Threshold (brightness): <span id="valThresh">110</span></label>
+      <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+      <label>Gaussian blur kernel (odd): <span id="valBlur">5</span></label>
+      <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+      <label>Morph kernel size: <span id="valMorph">5</span></label>
+      <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+      <label>Min contour area: <span id="valArea">500</span></label>
+      <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+    </div>
+
+    <div class="stats">
+      <div class="stat">A (top-right): <span id="countA">0</span></div>
+      <div class="stat">B (bottom-right): <span id="countB">0</span></div>
+      <div class="stat">C (bottom-left): <span id="countC">0</span></div>
+      <div class="stat">D (top-left): <span id="countD">0</span></div>
+      <div class="stat">Total: <span id="totalCount">0</span></div>
+    </div>
+
+    <div class="hint">Keep the phone in portrait for UI, but the captured frames will be processed in landscape orientation (rotated if needed).</div>
+    <div class="footer">Open over HTTPS or localhost. Use <code>python -m http.server</code> if needed.</div>
+  </div>
+
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+/* Portrait UI + Landscape capture:
+   - If camera provides portrait frames (videoWidth < videoHeight) and forceLandscape=true,
+     the frame is rotated 90° into landscape for processing & display.
+   - All canvases use DPR-aware backing sizes to avoid stretching.
+   - Snapshots match the debug canvas (what you see).
+*/
+
+// Config
+const MAX_PROCESS_DIM = 1280; // cap for performance (preserves aspect), set null to use native
+const video = document.getElementById('video');
+const canvasMask = document.getElementById('canvasMask');
+const canvasDebug = document.getElementById('canvasDebug');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const snapBtn = document.getElementById('snapBtn');
+const forceLandscapeCheckbox = document.getElementById('forceLandscape');
+
+const countAEl = document.getElementById('countA');
+const countBEl = document.getElementById('countB');
+const countCEl = document.getElementById('countC');
+const countDEl = document.getElementById('countD');
+const totalCountEl = document.getElementById('totalCount');
+
+const sliderThresh = document.getElementById('sliderThresh');
+const sliderBlur = document.getElementById('sliderBlur');
+const sliderMorph = document.getElementById('sliderMorph');
+const sliderArea = document.getElementById('sliderArea');
+
+const valThresh = document.getElementById('valThresh');
+const valBlur = document.getElementById('valBlur');
+const valMorph = document.getElementById('valMorph');
+const valArea = document.getElementById('valArea');
+
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { let v=parseInt(sliderBlur.value); if (v%2===0) sliderBlur.value=v+1; valBlur.innerText = sliderBlur.value; };
+sliderMorph.oninput = () => { let v=parseInt(sliderMorph.value); if (v%2===0) sliderMorph.value=v+1; valMorph.innerText = sliderMorph.value; };
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+// offscreen canvas used to capture and (optionally) rotate frames
+let offCanvas = document.createElement('canvas');
+let offCtx = offCanvas.getContext('2d');
+
+// processing resolution (OFF coords). These will be set dynamically from camera native
+let OFF_WIDTH = 1280, OFF_HEIGHT = 720;
+let rotateToLandscape = false; // if true, we rotate incoming frame 90deg to force landscape
+
+// OpenCV mats
+let srcMat, grayMat, blurMat, maskMat, morphMat, contours, hierarchy;
+let intervalId = null;
+let streaming = false;
+let openCvLoaded = false;
+const FPS = 10;
+
+function onOpenCvReady() { openCvLoaded = true; startBtn.disabled = false; startBtn.innerText='Start Camera'; console.log('OpenCV loaded'); }
+function onOpenCvError() { alert('Failed to load OpenCV.js'); console.error('opencv failed'); }
+
+// DPR-aware sizing (logical backing = OFF * DPR, CSS display preserves aspect)
+function setCanvasSizesDynamic() {
+  const DPR = window.devicePixelRatio || 1;
+  const stage = document.getElementById('stage');
+  const cssMaxWidth = Math.min(stage.clientWidth - 16, 960);
+  const cssWidth = cssMaxWidth;
+  const cssHeight = Math.round(cssWidth * OFF_HEIGHT / OFF_WIDTH);
+
+  canvasMask.width  = Math.round(OFF_WIDTH * DPR);
+  canvasMask.height = Math.round(OFF_HEIGHT * DPR);
+  canvasDebug.width = Math.round(OFF_WIDTH * DPR);
+  canvasDebug.height = Math.round(OFF_HEIGHT * DPR);
+
+  canvasMask.style.width  = cssWidth + 'px';
+  canvasMask.style.height = cssHeight + 'px';
+  canvasDebug.style.width = cssWidth + 'px';
+  canvasDebug.style.height = cssHeight + 'px';
+
+  // set transform so drawing operations use OFF coords
+  const cm = canvasMask.getContext('2d'); cm.setTransform(DPR,0,0,DPR,0,0);
+  const cd = canvasDebug.getContext('2d'); cd.setTransform(DPR,0,0,DPR,0,0);
+}
+
+// Start camera, detect native orientation & configure OFF_WIDTH/HEIGHT and rotation
+async function startCamera() {
+  if (!openCvLoaded) { alert('OpenCV not ready'); return; }
+  if (streaming) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    // small delay to ensure videoWidth/videoHeight populated
+    await new Promise(r => setTimeout(r, 150));
+    // get native camera frame size
+    const nativeW = video.videoWidth || OFF_WIDTH;
+    const nativeH = video.videoHeight || OFF_HEIGHT;
+    console.log('native camera size:', nativeW, nativeH);
+
+    // determine orientation: if nativeW < nativeH -> portrait capture
+    const nativeIsPortrait = nativeW < nativeH;
+    rotateToLandscape = nativeIsPortrait && forceLandscapeCheckbox.checked;
+
+    // choose OFF size preserving aspect; if rotate, swap dims
+    let desiredW = nativeW, desiredH = nativeH;
+    // cap based on MAX_PROCESS_DIM, preserving aspect
+    if (MAX_PROCESS_DIM) {
+      const maxNative = Math.max(nativeW, nativeH);
+      if (maxNative > MAX_PROCESS_DIM) {
+        const scale = MAX_PROCESS_DIM / maxNative;
+        desiredW = Math.max(1, Math.round(nativeW * scale));
+        desiredH = Math.max(1, Math.round(nativeH * scale));
+      }
+    }
+
+    if (rotateToLandscape) {
+      // we will rotate the portrait frame to landscape -> swap OFF dims
+      OFF_WIDTH = Math.max(1, desiredH);
+      OFF_HEIGHT = Math.max(1, desiredW);
+    } else {
+      OFF_WIDTH = Math.max(1, desiredW);
+      OFF_HEIGHT = Math.max(1, desiredH);
+    }
+
+    // configure offscreen canvas to OFF dims
+    offCanvas.width = OFF_WIDTH;
+    offCanvas.height = OFF_HEIGHT;
+
+    // try to set camera to widest zoom if possible
+    try {
+      const [track] = stream.getVideoTracks();
+      if (track && track.getCapabilities) {
+        const caps = track.getCapabilities();
+        if ('zoom' in caps) {
+          const minZ = caps.zoom.min !== undefined ? caps.zoom.min : caps.zoom;
+          await track.applyConstraints({ advanced: [{ zoom: minZ }] });
+          console.log('applied zoom', minZ);
+        }
+      }
+    } catch (e) { console.warn('zoom set failed', e); }
+
+    // DPR-aware canvas sizes
+    setCanvasSizesDynamic();
+
+    // create OpenCV mats using OFF_HEIGHT x OFF_WIDTH
+    srcMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC4);
+    grayMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    blurMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    maskMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    morphMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+
+    streaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    intervalId = setInterval(processFrame, 1000 / FPS);
+  } catch (err) {
+    alert('Could not start camera: ' + err.message);
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  streaming = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  clearInterval(intervalId);
+  try { const tracks = video.srcObject.getTracks(); tracks.forEach(t=>t.stop()); video.srcObject = null; } catch(e){}
+  try { srcMat.delete(); grayMat.delete(); blurMat.delete(); maskMat.delete(); morphMat.delete(); contours.delete(); hierarchy.delete(); } catch(e){}
+}
+
+// draw current video frame into offCanvas, rotating if required
+function captureIntoOffCanvas() {
+  // If no rotation needed: draw directly scaled from video native to OFF canvas
+  if (!rotateToLandscape) {
+    offCtx.setTransform(1,0,0,1,0,0);
+    offCtx.clearRect(0,0, offCanvas.width, offCanvas.height);
+    // drawImage(video, sx,sy,sw,sh, dx,dy,dw,dh)
+    offCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, 0, 0, offCanvas.width, offCanvas.height);
+    return;
+  }
+  // rotation case: incoming video is portrait; we rotate 90deg clockwise so result is landscape
+  // offCanvas has width = nativeH (or scaled), height = nativeW (or scaled)
+  offCtx.save();
+  // clear
+  offCtx.setTransform(1,0,0,1,0,0);
+  offCtx.clearRect(0,0, offCanvas.width, offCanvas.height);
+  // move origin to top-left of rotated canvas, then rotate
+  // We want: drawImage such that video (w=video.videoWidth, h=video.videoHeight) maps into offCanvas rotated 90deg clockwise.
+  // Steps: translate to right edge, rotate 90deg, then draw scaled
+  offCtx.translate(offCanvas.width, 0);
+  offCtx.rotate(Math.PI/2); // rotate 90deg clockwise
+  // Now the drawing coordinate system has origin where we want; draw video scaled so its native size maps to (offCanvas.height x offCanvas.width) because axes swapped.
+  offCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, 0, 0, offCanvas.height, offCanvas.width);
+  offCtx.restore();
+}
+
+// Main per-frame processing
+function processFrame() {
+  if (!streaming) return;
+
+  // 1) capture and (optionally) rotate into offCanvas
+  captureIntoOffCanvas();
+
+  // 2) feed offCanvas into OpenCV Mat
+  const img = offCtx.getImageData(0,0, offCanvas.width, offCanvas.height);
+  srcMat.data.set(img.data);
+
+  // 3) grayscale -> blur -> threshold -> morph -> contours
+  cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+  let ksize = parseInt(sliderBlur.value);
+  if (ksize % 2 === 0) ksize = ksize + 1;
+  if (ksize < 1) ksize = 1;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksize, ksize), 0);
+  const thresh = parseInt(sliderThresh.value);
+  cv.threshold(blurMat, maskMat, thresh, 255, cv.THRESH_BINARY_INV);
+  let morphK = parseInt(sliderMorph.value);
+  if (morphK % 2 === 0) morphK = morphK + 1;
+  const M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+  cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, M);
+  cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, M);
+
+  // contours + bounding boxes
+  cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  const boxes = [];
+  const minArea = parseInt(sliderArea.value);
+  for (let i=0;i<contours.size();++i) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    if (area < minArea) { cnt.delete(); continue; }
+    const rect = cv.boundingRect(cnt);
+    const cx = rect.x + Math.round(rect.width/2);
+    const cy = rect.y + Math.round(rect.height/2);
+    boxes.push({rect, area, cx, cy});
+    cnt.delete();
+  }
+
+  // display mask (cv.imshow handles mapping to canvas backing)
+  cv.imshow(canvasMask, morphMat);
+
+  // debug overlay — draw offCanvas into canvasDebug then overlay boxes & quadrant lines (all in OFF coords)
+  const dctx = canvasDebug.getContext('2d');
+  dctx.clearRect(0,0, OFF_WIDTH, OFF_HEIGHT);
+  dctx.drawImage(offCanvas, 0, 0, OFF_WIDTH, OFF_HEIGHT, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+
+  // quadrant lines and labels
+  const midX = Math.round(OFF_WIDTH/2), midY = Math.round(OFF_HEIGHT/2);
+  dctx.strokeStyle = 'red'; dctx.lineWidth = Math.max(2, Math.round(OFF_WIDTH/300));
+  dctx.beginPath(); dctx.moveTo(midX,0); dctx.lineTo(midX,OFF_HEIGHT); dctx.moveTo(0,midY); dctx.lineTo(OFF_WIDTH,midY); dctx.stroke();
+
+  dctx.fillStyle = 'rgba(255,0,0,0.95)'; dctx.font = `bold ${Math.max(12, Math.round(OFF_WIDTH/30))}px sans-serif`;
+  const qHalfW = Math.round(OFF_WIDTH/4), qHalfH = Math.round(OFF_HEIGHT/4);
+  dctx.fillText('A', midX + qHalfW - 12, qHalfH + 12);
+  dctx.fillText('B', midX + qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('C', qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('D', qHalfW - 12, qHalfH + 12);
+
+  // draw boxes & centroids and count by quadrant
+  dctx.strokeStyle='lime'; dctx.lineWidth = Math.max(1, Math.round(OFF_WIDTH/500)); dctx.fillStyle='yellow';
+  let countA=0,countB=0,countC=0,countD=0;
+  for (const b of boxes) {
+    dctx.strokeRect(b.rect.x, b.rect.y, b.rect.width, b.rect.height);
+    dctx.beginPath(); dctx.arc(b.cx, b.cy, Math.max(3, Math.round(OFF_WIDTH/200)), 0, Math.PI*2); dctx.fill();
+    if (b.cx >= midX && b.cy < midY) countA++;
+    else if (b.cx >= midX && b.cy >= midY) countB++;
+    else if (b.cx < midX && b.cy >= midY) countC++;
+    else countD++;
+  }
+
+  countAEl.innerText = countA;
+  countBEl.innerText = countB;
+  countCEl.innerText = countC;
+  countDEl.innerText = countD;
+  totalCountEl.innerText = (countA+countB+countC+countD);
+}
+
+// Snapshot: download exactly what you see on debug canvas
+snapBtn.addEventListener('click', () => {
+  try {
+    const a = document.createElement('a');
+    a.href = canvasDebug.toDataURL('image/png');
+    a.download = 'debug_' + Date.now() + '.png';
+    a.click();
+    const b = document.createElement('a');
+    b.href = canvasMask.toDataURL('image/png');
+    b.download = 'mask_' + Date.now() + '.png';
+    b.click();
+  } catch(e){ console.warn(e); }
+});
+
+// UI wiring
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+window.addEventListener('resize', () => { if (streaming) setCanvasSizesDynamic(); });
+window.addEventListener('beforeunload', stopCamera);
+</script>
+</body>
+</html>

@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter — 4 Quadrants — 16:9 Fixed Aspect</title>
+<style>
+  :root { --bg:#0b1220; --card:#071029; --muted:#9fb0c8; }
+  body { margin:0; font-family:system-ui, -apple-system, Roboto, Arial; background:var(--bg); color:#e6eef8; display:flex; flex-direction:column; align-items:center; padding:8px; }
+  h2 { margin:8px 0 6px; font-size:18px; text-align:center; }
+  #stage { width:100%; max-width:900px; background:var(--card); padding:8px; border-radius:10px; box-sizing:border-box; }
+  .buttons { display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap; justify-content:center; }
+  button { padding:8px 10px; border-radius:8px; border:none; background:#0f172a; color:#fff; font-weight:700; }
+  .twocol { display:flex; flex-direction:column; gap:12px; margin-top:8px; } /* stack vertically */
+  /* canvas base styles - we will set explicit CSS width/height in JS to preserve aspect */
+  canvas { display:block; border-radius:6px; background:#000; image-rendering:-webkit-optimize-contrast; }
+  .controls { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+  label { font-size:13px; color:var(--muted); }
+  input[type=range] { width:100%; }
+  .stats { display:flex; gap:8px; margin-top:8px; align-items:center; justify-content:center; flex-wrap:wrap; }
+  .stat { background:rgba(255,255,255,0.03); padding:8px 10px; border-radius:8px; font-weight:800; min-width:80px; text-align:center; }
+  .tiny { font-size:12px; color:var(--muted); margin-top:6px; text-align:center; }
+  .hint { font-size:13px; color:#cfe7ff; opacity:0.9; margin-top:8px; text-align:center; }
+  .footer { font-size:12px; color:var(--muted); margin-top:8px; text-align:center; }
+  video { display:none; } /* hidden */
+</style>
+</head>
+<body>
+  <h2>Block Counter — 4 Quadrants — 16:9 (Fixed Aspect)</h2>
+  <div id="stage">
+    <div class="buttons">
+      <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="snapBtn">Save Snapshot</button>
+    </div>
+
+    <video id="video" playsinline autoplay muted></video>
+
+    <div class="twocol">
+      <div>
+        <!-- internal canvas resolution will be OFF_WIDTH x OFF_HEIGHT; CSS size set in JS -->
+        <canvas id="canvasMask"></canvas>
+        <div class="tiny">Mask (threshold + morph)</div>
+      </div>
+
+      <div>
+        <canvas id="canvasDebug"></canvas>
+        <div class="tiny">Debug overlay (video frame + boxes & quadrant lines)</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>Threshold (brightness): <span id="valThresh">110</span></label>
+      <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+      <label>Gaussian blur kernel (odd): <span id="valBlur">5</span></label>
+      <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+      <label>Morph kernel size: <span id="valMorph">5</span></label>
+      <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+      <label>Min contour area: <span id="valArea">500</span></label>
+      <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+    </div>
+
+    <div class="stats" id="statsRow">
+      <div class="stat">A (top-right): <span id="countA">0</span></div>
+      <div class="stat">B (bottom-right): <span id="countB">0</span></div>
+      <div class="stat">C (bottom-left): <span id="countC">0</span></div>
+      <div class="stat">D (top-left): <span id="countD">0</span></div>
+      <div class="stat">Total: <span id="totalCount">0</span></div>
+    </div>
+
+    <div class="hint">Tip: Keep phone top-down above the white paper. Use sliders to tune detection. The displayed canvases preserve real aspect ratio (no stretching).</div>
+    <div class="footer">Serve over HTTPS or from localhost. If camera permission is blocked for local files, run <code>python -m http.server</code> and open via your machine's IP.</div>
+  </div>
+
+<!-- Load OpenCV.js -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+/* Fixed-aspect 16:9 capture + quadrant counting
+   Avoids stretching: canvas.width/height (logical) are OFF_WIDTH/OFF_HEIGHT
+   CSS width/height are set to exact pixel values preserving 16:9 aspect.
+*/
+
+const OFF_WIDTH = 1280; // logical canvas width (pixels)
+const OFF_HEIGHT = 720; // logical canvas height (pixels)
+
+let video = document.getElementById('video');
+let canvasMask = document.getElementById('canvasMask');
+let canvasDebug = document.getElementById('canvasDebug');
+let startBtn = document.getElementById('startBtn');
+let stopBtn = document.getElementById('stopBtn');
+let snapBtn = document.getElementById('snapBtn');
+
+let countAEl = document.getElementById('countA');
+let countBEl = document.getElementById('countB');
+let countCEl = document.getElementById('countC');
+let countDEl = document.getElementById('countD');
+let totalCountEl = document.getElementById('totalCount');
+
+let sliderThresh = document.getElementById('sliderThresh');
+let sliderBlur = document.getElementById('sliderBlur');
+let sliderMorph = document.getElementById('sliderMorph');
+let sliderArea = document.getElementById('sliderArea');
+
+let valThresh = document.getElementById('valThresh');
+let valBlur = document.getElementById('valBlur');
+let valMorph = document.getElementById('valMorph');
+let valArea = document.getElementById('valArea');
+
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { let v = parseInt(sliderBlur.value); if (v%2===0) sliderBlur.value = v+1; valBlur.innerText = sliderBlur.value; };
+sliderMorph.oninput = () => { let v = parseInt(sliderMorph.value); if (v%2===0) sliderMorph.value = v+1; valMorph.innerText = sliderMorph.value; };
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+let streaming = false;
+let srcMat, grayMat, blurMat, maskMat, morphMat, contours, hierarchy;
+let FPS = 10;
+let intervalId = null;
+let openCvLoaded = false;
+
+// offscreen canvas for capturing frames at exact OFF_WIDTH x OFF_HEIGHT
+const offCanvas = document.createElement('canvas');
+offCanvas.width = OFF_WIDTH; offCanvas.height = OFF_HEIGHT;
+const offCtx = offCanvas.getContext('2d');
+
+function onOpenCvReady() {
+  console.log('OpenCV.js loaded.');
+  openCvLoaded = true;
+  startBtn.disabled = false;
+  startBtn.innerText = 'Start Camera';
+}
+function onOpenCvError() {
+  alert('Failed to load OpenCV.js. Check network or try a different browser.');
+  console.error('Failed to load OpenCV.js');
+}
+
+function setCanvasLogicalAndCssSizes() {
+  // set the internal (logical) pixel size
+  canvasMask.width = OFF_WIDTH; canvasMask.height = OFF_HEIGHT;
+  canvasDebug.width = OFF_WIDTH; canvasDebug.height = OFF_HEIGHT;
+
+  // compute CSS display width based on stage container width and preserve 16:9
+  const stage = document.getElementById('stage');
+  const maxWidth = Math.min(stage.clientWidth - 16, 900);
+  const cssWidth = maxWidth;
+  const cssHeight = Math.round(cssWidth * OFF_HEIGHT / OFF_WIDTH);
+
+  // set CSS sizes explicitly (prevents browser from using height:auto that can distort)
+  canvasMask.style.width = cssWidth + 'px';
+  canvasMask.style.height = cssHeight + 'px';
+  canvasDebug.style.width = cssWidth + 'px';
+  canvasDebug.style.height = cssHeight + 'px';
+}
+
+async function trySetWidestZoom(track) {
+  try {
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if ('zoom' in caps) {
+      const minZ = caps.zoom.min !== undefined ? caps.zoom.min : caps.zoom;
+      await track.applyConstraints({ advanced: [{ zoom: minZ }] });
+      console.log('Set zoom to', minZ);
+    } else {
+      console.log('Zoom not supported');
+    }
+  } catch (err) {
+    console.warn('Cannot set zoom:', err);
+  }
+}
+
+async function startCamera() {
+  if (!openCvLoaded) { alert('OpenCV not ready'); return; }
+  if (streaming) return;
+  try {
+    const constraints = { video: { facingMode: 'environment', width: { ideal: OFF_WIDTH }, height: { ideal: OFF_HEIGHT } }, audio: false };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await video.play();
+
+    // attempt to set widest zoom if available
+    const [track] = stream.getVideoTracks();
+    if (track) trySetWidestZoom(track);
+
+    // ensure canvas sizes match logical and CSS
+    setCanvasLogicalAndCssSizes();
+
+    // init OpenCV mats with OFF_HEIGHT x OFF_WIDTH (note row-major height)
+    srcMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC4);
+    grayMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    blurMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    maskMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    morphMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+
+    streaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    intervalId = setInterval(processFrame, 1000 / FPS);
+  } catch (err) {
+    alert('Could not start camera: ' + err.message);
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  streaming = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  clearInterval(intervalId);
+  const tracks = video.srcObject.getTracks();
+  tracks.forEach(t => t.stop());
+  video.srcObject = null;
+  // free mats
+  try {
+    srcMat.delete(); grayMat.delete(); blurMat.delete(); maskMat.delete(); morphMat.delete();
+    contours.delete(); hierarchy.delete();
+  } catch (e) {}
+}
+
+function processFrame() {
+  if (!streaming) return;
+  // draw current video frame scaled into offCanvas of exact OFF_WIDTH x OFF_HEIGHT
+  offCtx.drawImage(video, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+
+  // feed offCanvas data into OpenCV Mat
+  const imageData = offCtx.getImageData(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  srcMat.data.set(imageData.data);
+
+  // convert to gray
+  cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+
+  // blur
+  let ksize = parseInt(sliderBlur.value);
+  if (ksize % 2 === 0) ksize = ksize + 1;
+  if (ksize < 1) ksize = 1;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksize, ksize), 0);
+
+  // threshold inverse
+  let thresh = parseInt(sliderThresh.value);
+  cv.threshold(blurMat, maskMat, thresh, 255, cv.THRESH_BINARY_INV);
+
+  // morphology
+  let morphK = parseInt(sliderMorph.value);
+  if (morphK % 2 === 0) morphK = morphK + 1;
+  let M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+  cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, M);
+  cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, M);
+
+  // find contours
+  cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  let boxes = [];
+  let minArea = parseInt(sliderArea.value);
+  for (let i = 0; i < contours.size(); ++i) {
+    let cnt = contours.get(i);
+    let area = cv.contourArea(cnt);
+    if (area < minArea) { cnt.delete(); continue; }
+    let rect = cv.boundingRect(cnt);
+    let cx = rect.x + Math.round(rect.width / 2);
+    let cy = rect.y + Math.round(rect.height / 2);
+    boxes.push({rect, area, cx, cy});
+    cnt.delete();
+  }
+
+  // show mask using logical canvas pixels
+  cv.imshow(canvasMask, morphMat);
+
+  // debug overlay: draw offCanvas frame into canvasDebug (use logical pixels)
+  const dctx = canvasDebug.getContext('2d');
+  // drawImage destination size uses logical pixels (canvasDebug.width/height), not CSS px
+  dctx.clearRect(0,0, canvasDebug.width, canvasDebug.height);
+  dctx.drawImage(offCanvas, 0, 0, canvasDebug.width, canvasDebug.height);
+
+  // draw quadrant red lines (logical coords)
+  const midX = Math.round(canvasDebug.width / 2);
+  const midY = Math.round(canvasDebug.height / 2);
+  dctx.strokeStyle = 'red';
+  dctx.lineWidth = Math.max(2, Math.round(canvasDebug.width / 300));
+  dctx.beginPath();
+  dctx.moveTo(midX, 0); dctx.lineTo(midX, canvasDebug.height);
+  dctx.moveTo(0, midY); dctx.lineTo(canvasDebug.width, midY);
+  dctx.stroke();
+
+  // label quadrants A,B,C,D (logical coordinates)
+  dctx.fillStyle = 'rgba(255,0,0,0.95)';
+  dctx.font = `${Math.max(16, Math.round(canvasDebug.width/30))}px sans-serif`;
+  const qHalfW = Math.round(canvasDebug.width / 4);
+  const qHalfH = Math.round(canvasDebug.height / 4);
+  dctx.fillText('A', midX + qHalfW - 12, qHalfH + 12);
+  dctx.fillText('B', midX + qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('C', qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('D', qHalfW - 12, qHalfH + 12);
+
+  // counts
+  let countA=0, countB=0, countC=0, countD=0;
+  dctx.strokeStyle = 'lime';
+  dctx.lineWidth = Math.max(1, Math.round(canvasDebug.width/500));
+  dctx.fillStyle = 'yellow';
+  for (let b of boxes) {
+    // draw bounding box and centroid (logical coords)
+    dctx.strokeRect(b.rect.x, b.rect.y, b.rect.width, b.rect.height);
+    dctx.beginPath(); dctx.arc(b.cx, b.cy, Math.max(3, Math.round(canvasDebug.width/200)), 0, Math.PI*2); dctx.fill();
+
+    // determine quadrant (origin top-left)
+    const cx = b.cx, cy = b.cy;
+    if (cx >= midX && cy < midY) countA++;
+    else if (cx >= midX && cy >= midY) countB++;
+    else if (cx < midX && cy >= midY) countC++;
+    else countD++;
+  }
+
+  // update UI counts (DOM)
+  countAEl.innerText = countA;
+  countBEl.innerText = countB;
+  countCEl.innerText = countC;
+  countDEl.innerText = countD;
+  totalCountEl.innerText = (countA + countB + countC + countD);
+}
+
+// UI wiring
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+snapBtn.addEventListener('click', () => {
+  // download debug and mask snapshots (they are logical-size images)
+  const a = document.createElement('a'); a.href = canvasDebug.toDataURL('image/png'); a.download = 'debug_'+Date.now()+'.png'; a.click();
+  const b = document.createElement('a'); b.href = canvasMask.toDataURL('image/png'); b.download = 'mask_'+Date.now()+'.png'; b.click();
+});
+
+// handle resize: recompute CSS size (keeps aspect) but DO NOT change logical canvas size
+window.addEventListener('resize', () => { if (streaming) setCanvasLogicalAndCssSizes(); });
+window.addEventListener('beforeunload', () => { stopCamera(); });
+</script>
+</body>
+</html>

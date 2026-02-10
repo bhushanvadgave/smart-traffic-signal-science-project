@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter — Dark + Orange (Full + Zoom + Quadrant Counts)</title>
+<style>
+  body { margin:0; font-family:system-ui, -apple-system, Roboto, Arial;
+         background:#071430; color:#e6eef8; display:flex; flex-direction:column; align-items:center; padding:10px; }
+  #stage { width:100%; max-width:1000px; background:#071029; padding:12px; border-radius:10px; box-sizing:border-box; }
+  h2 { margin:6px 0; text-align:center; }
+  .buttons, .serialControls, .zoomControls { display:flex; gap:8px; margin-bottom:12px; justify-content:center; flex-wrap:wrap; }
+  button { padding:8px 12px; border-radius:8px; border:none; background:#0f172a; color:#fff; font-weight:700; cursor:pointer; }
+  canvas { display:block; border-radius:8px; background:#000; margin:8px auto; max-width:100%; height:auto; }
+  #canvasMask { display:none; } /* mask disabled */
+  .controls { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+  label { font-size:13px; color:#9fb0c8; }
+  input[type=range] { width:100%; }
+  .stats { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; justify-content:center; }
+  .stat { background:rgba(255,255,255,0.03); padding:8px 10px; border-radius:8px; font-weight:700; min-width:120px; text-align:center; }
+  #serialLog { background:#031226; color:#9fb0c8; padding:8px; border-radius:8px; height:120px; overflow:auto;
+               font-family:monospace; font-size:12px; margin-top:10px; white-space:pre-wrap; }
+  .statusDot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .green { background:#2dd4bf; } .red { background:#fb7185; }
+  .hint { font-size:13px; color:#cfe7ff; opacity:0.95; margin-top:8px; text-align:center; }
+  .footer { font-size:12px; color:#9fb0c8; margin-top:8px; text-align:center; }
+  video { display:none; } /* hidden; used for capture only */
+</style>
+</head>
+<body>
+  <div id="stage">
+    <h2>Block Counter — Dark + Orange (Quadrants A,B,C,D)</h2>
+
+    <div class="buttons">
+      <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="snapBtn">Save Snapshot</button>
+    </div>
+
+    <div class="serialControls">
+      <button id="connectSerialBtn">Connect to Arduino (Web Serial)</button>
+      <button id="disconnectSerialBtn" disabled>Disconnect</button>
+      <div id="serialStatus" style="display:flex;align-items:center;color:#9fb0c8;">
+        <span id="statusDot" class="statusDot red"></span>
+        <span id="statusText">Serial: disconnected</span>
+      </div>
+    </div>
+
+    <div id="serialLog">TX and ACK messages will appear here...</div>
+
+    <video id="video" playsinline autoplay muted></video>
+
+    <!-- Mask canvas hidden; keep it in DOM so we can re-enable easily -->
+    <canvas id="canvasMask"></canvas>
+
+    <!-- Debug canvas where the frame and overlays are shown -->
+    <canvas id="canvasDebug"></canvas>
+
+    <!-- Zoom controls -->
+    <div class="zoomControls">
+      <button id="zoomOutBtn">-</button>
+      <input id="zoomSlider" type="range" min="1" max="1" step="0.1" value="1" disabled />
+      <button id="zoomInBtn">+</button>
+    </div>
+
+    <div class="controls">
+      <label>Threshold (brightness): <span id="valThresh">110</span></label>
+      <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+      <label>Gaussian blur kernel (odd): <span id="valBlur">5</span></label>
+      <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+      <label>Morph kernel size: <span id="valMorph">5</span></label>
+      <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+      <label>Min contour area: <span id="valArea">500</span></label>
+      <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+    </div>
+
+    <div class="stats">
+      <div class="stat">Dark A: <span id="countDarkA">0</span></div>
+      <div class="stat">Dark B: <span id="countDarkB">0</span></div>
+      <div class="stat">Dark C: <span id="countDarkC">0</span></div>
+      <div class="stat">Dark D: <span id="countDarkD">0</span></div>
+      <div class="stat">Orange A: <span id="countOrangeA">0</span></div>
+      <div class="stat">Orange B: <span id="countOrangeB">0</span></div>
+      <div class="stat">Orange C: <span id="countOrangeC">0</span></div>
+      <div class="stat">Orange D: <span id="countOrangeD">0</span></div>
+    </div>
+
+    <div class="hint">Tip: use a white paper background and steady lighting. Zoom depends on camera support.</div>
+    <div class="footer">Serve over HTTPS or localhost. Web Serial works best in Desktop Chrome.</div>
+  </div>
+
+<!-- OpenCV.js -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+// ================== CONFIG ==================
+const ORANGE_LOWER = [5, 120, 120, 0];   // HSV lower (4 elements to satisfy Scalar requirement)
+const ORANGE_UPPER = [25, 255, 255, 255]; // HSV upper
+const SEND_DEBOUNCE_MS = 300;
+let OFF_WIDTH = 1280, OFF_HEIGHT = 720;
+
+// ================== DOM refs ==================
+const video = document.getElementById('video');
+const canvasMask = document.getElementById('canvasMask');
+const canvasDebug = document.getElementById('canvasDebug');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const snapBtn = document.getElementById('snapBtn');
+
+const connectSerialBtn = document.getElementById('connectSerialBtn');
+const disconnectSerialBtn = document.getElementById('disconnectSerialBtn');
+const serialLog = document.getElementById('serialLog');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+const sliderThresh = document.getElementById('sliderThresh');
+const sliderBlur = document.getElementById('sliderBlur');
+const sliderMorph = document.getElementById('sliderMorph');
+const sliderArea = document.getElementById('sliderArea');
+
+const valThresh = document.getElementById('valThresh');
+const valBlur = document.getElementById('valBlur');
+const valMorph = document.getElementById('valMorph');
+const valArea = document.getElementById('valArea');
+
+const zoomSlider = document.getElementById('zoomSlider');
+const zoomInBtn = document.getElementById('zoomInBtn');
+const zoomOutBtn = document.getElementById('zoomOutBtn');
+
+const countDarkEls = {
+  A: document.getElementById('countDarkA'),
+  B: document.getElementById('countDarkB'),
+  C: document.getElementById('countDarkC'),
+  D: document.getElementById('countDarkD')
+};
+const countOrangeEls = {
+  A: document.getElementById('countOrangeA'),
+  B: document.getElementById('countOrangeB'),
+  C: document.getElementById('countOrangeC'),
+  D: document.getElementById('countOrangeD')
+};
+
+// sliders UI
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { let v = parseInt(sliderBlur.value); if (v % 2 === 0) sliderBlur.value = v + 1; valBlur.innerText = sliderBlur.value; };
+sliderMorph.oninput = () => { let v = parseInt(sliderMorph.value); if (v % 2 === 0) sliderMorph.value = v + 1; valMorph.innerText = sliderMorph.value; };
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+// ================== OpenCV Mats ==================
+let srcMat, grayMat, blurMat, maskMat, morphMat;
+let hsvMat, orangeMask, orangeMorph;
+let contours, hierarchy;
+let streaming = false;
+let intervalId = null;
+let openCvLoaded = false;
+
+// ================== Serial ==================
+let port = null, writer = null, reader = null, keepReading = false;
+let rxBuffer = '';
+let lastSentCounts = Array(8).fill(-1);
+let desiredCounts = Array(8).fill(-1);
+let pendingSendTimeout = null;
+
+// ================== Camera track (zoom) ==================
+let cameraTrack = null;
+
+// ===== OpenCV ready =====
+function onOpenCvReady() {
+  openCvLoaded = true;
+  startBtn.disabled = false;
+  startBtn.innerText = 'Start Camera';
+  appendLog('OpenCV.js loaded');
+}
+function onOpenCvError() {
+  alert('Failed to load OpenCV.js. Check network or try another browser.');
+  appendLog('OpenCV.js failed to load');
+}
+
+// ===== Start/Stop Camera =====
+async function startCamera() {
+  if (!openCvLoaded) { alert('OpenCV not ready'); return; }
+  if (streaming) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = stream;
+    cameraTrack = stream.getVideoTracks()[0];
+    await video.play();
+    // allow dimensions to stabilize
+    await new Promise(r => setTimeout(r, 150));
+    OFF_WIDTH = video.videoWidth || OFF_WIDTH;
+    OFF_HEIGHT = video.videoHeight || OFF_HEIGHT;
+
+    // create mats
+    srcMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC4);
+    grayMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    blurMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    maskMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    morphMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    hsvMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC3);
+    orangeMask = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    orangeMorph = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    contours = new cv.MatVector(); hierarchy = new cv.Mat();
+
+    // set canvas sizes (backing store)
+    const DPR = window.devicePixelRatio || 1;
+    canvasDebug.width = Math.round(OFF_WIDTH * DPR);
+    canvasDebug.height = Math.round(OFF_HEIGHT * DPR);
+    canvasDebug.style.width = Math.min(OFF_WIDTH, 920) + 'px';
+    canvasMask.width = Math.round(OFF_WIDTH * DPR);
+    canvasMask.height = Math.round(OFF_HEIGHT * DPR);
+    canvasMask.style.width = canvasDebug.style.width;
+
+    streaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    intervalId = setInterval(processFrame, 100); // ~10 FPS
+
+    // Setup zoom controls if supported
+    if (cameraTrack && cameraTrack.getCapabilities) {
+      try {
+        const caps = cameraTrack.getCapabilities();
+        if ('zoom' in caps) {
+          zoomSlider.min = caps.zoom.min;
+          zoomSlider.max = caps.zoom.max;
+          zoomSlider.step = (caps.zoom.step) ? caps.zoom.step : 0.1;
+          zoomSlider.value = (cameraTrack.getSettings().zoom !== undefined) ? cameraTrack.getSettings().zoom : caps.zoom.min;
+          zoomSlider.disabled = false;
+        } else {
+          zoomSlider.disabled = true;
+        }
+      } catch (e) {
+        console.warn('Zoom setup error', e);
+        zoomSlider.disabled = true;
+      }
+    }
+  } catch (err) {
+    alert('Could not start camera: ' + err.message);
+    appendLog('Camera start error: ' + err);
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  streaming = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  clearInterval(intervalId);
+  try {
+    const tracks = video.srcObject.getTracks();
+    tracks.forEach(t => t.stop());
+    video.srcObject = null;
+  } catch (e) {}
+  // free mats
+  try { srcMat.delete(); grayMat.delete(); blurMat.delete(); maskMat.delete(); morphMat.delete(); hsvMat.delete(); orangeMask.delete(); orangeMorph.delete(); contours.delete(); hierarchy.delete(); } catch (e) {}
+}
+
+// ===== Zoom helpers =====
+zoomInBtn.addEventListener('click', async () => {
+  if (!cameraTrack) return;
+  let v = parseFloat(zoomSlider.value) + parseFloat(zoomSlider.step || 0.1);
+  await setZoom(v);
+});
+zoomOutBtn.addEventListener('click', async () => {
+  if (!cameraTrack) return;
+  let v = parseFloat(zoomSlider.value) - parseFloat(zoomSlider.step || 0.1);
+  await setZoom(v);
+});
+zoomSlider.addEventListener('input', async () => { await setZoom(parseFloat(zoomSlider.value)); });
+
+async function setZoom(val) {
+  if (!cameraTrack || !cameraTrack.getCapabilities) return;
+  const caps = cameraTrack.getCapabilities();
+  if (!('zoom' in caps)) return;
+  val = Math.max(caps.zoom.min, Math.min(caps.zoom.max, val));
+  try {
+    await cameraTrack.applyConstraints({ advanced: [{ zoom: val }] });
+    zoomSlider.value = val;
+    appendLog('Zoom set: ' + val);
+  } catch (err) {
+    console.warn('Zoom apply error', err);
+  }
+}
+
+// ===== Main frame processing (dark + orange) =====
+let lastLoggedCounts = Array(8).fill(-1);
+
+function processFrame() {
+  if (!streaming) return;
+
+  // draw current frame into debug canvas (use its backing pixels)
+  const dctx = canvasDebug.getContext('2d');
+  // match drawing to logical pixel size: set transform to DPR so drawing coordinates are OFF_WIDTH x OFF_HEIGHT
+  const DPR = window.devicePixelRatio || 1;
+  dctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  dctx.clearRect(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  dctx.drawImage(video, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+
+  // grab pixels into srcMat
+  const img = dctx.getImageData(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  srcMat.data.set(img.data);
+
+  // ----- Dark detection (grayscale -> blur -> threshold -> morph) -----
+  cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+  let ksize = parseInt(sliderBlur.value) || 5; if (ksize % 2 === 0) ksize++;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksize, ksize), 0);
+  cv.threshold(blurMat, maskMat, parseInt(sliderThresh.value), 255, cv.THRESH_BINARY_INV);
+  let morphK = parseInt(sliderMorph.value) || 5; if (morphK % 2 === 0) morphK++;
+  let M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+  cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, M);
+  cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, M);
+
+  // (Mask canvas is hidden) If you want to visualize mask again, uncomment the next line:
+  // cv.imshow(canvasMask, morphMat);
+
+  // ----- Orange detection (HSV inRange -> morph) -----
+  cv.cvtColor(srcMat, hsvMat, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(hsvMat, hsvMat, cv.COLOR_RGB2HSV);
+  const low = new cv.Mat(hsvMat.rows, hsvMat.cols, hsvMat.type(), ORANGE_LOWER);
+  const high = new cv.Mat(hsvMat.rows, hsvMat.cols, hsvMat.type(), ORANGE_UPPER);
+  cv.inRange(hsvMat, low, high, orangeMask);
+  low.delete(); high.delete();
+  cv.morphologyEx(orangeMask, orangeMorph, cv.MORPH_OPEN, M);
+  cv.morphologyEx(orangeMorph, orangeMorph, cv.MORPH_CLOSE, M);
+
+  // ----- Find contours and count per quadrant -----
+  const midX = Math.round(OFF_WIDTH / 2), midY = Math.round(OFF_HEIGHT / 2);
+  const minArea = Math.max(10, parseInt(sliderArea.value) || 100);
+
+  // dark contours
+  let darkCounts = [0, 0, 0, 0];
+  cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  for (let i = 0; i < contours.size(); ++i) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    if (area >= minArea) {
+      const r = cv.boundingRect(cnt);
+      const cx = r.x + r.width / 2;
+      const cy = r.y + r.height / 2;
+      if (cx >= midX && cy < midY) darkCounts[0]++; // A
+      else if (cx >= midX && cy >= midY) darkCounts[1]++; // B
+      else if (cx < midX && cy >= midY) darkCounts[2]++; // C
+      else darkCounts[3]++; // D
+
+      // draw dark box (thin green) and centroid
+      dctx.strokeStyle = 'lime';
+      dctx.lineWidth = 2;
+      dctx.strokeRect(r.x, r.y, r.width, r.height);
+      dctx.fillStyle = 'yellow';
+      dctx.beginPath(); dctx.arc(cx, cy, 4, 0, Math.PI * 2); dctx.fill();
+    }
+    cnt.delete();
+  }
+
+  // orange contours
+  let orangeCounts = [0, 0, 0, 0];
+  cv.findContours(orangeMorph, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  for (let i = 0; i < contours.size(); ++i) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    if (area >= minArea) {
+      const r = cv.boundingRect(cnt);
+      const cx = r.x + r.width / 2;
+      const cy = r.y + r.height / 2;
+      if (cx >= midX && cy < midY) orangeCounts[0]++; // A
+      else if (cx >= midX && cy >= midY) orangeCounts[1]++; // B
+      else if (cx < midX && cy >= midY) orangeCounts[2]++; // C
+      else orangeCounts[3]++; // D
+
+      // draw orange box (thick red) and centroid
+      dctx.strokeStyle = 'red';
+      dctx.lineWidth = Math.max(3, Math.round(OFF_WIDTH / 200));
+      dctx.strokeRect(r.x, r.y, r.width, r.height);
+      dctx.fillStyle = 'red';
+      dctx.beginPath(); dctx.arc(cx, cy, 4, 0, Math.PI * 2); dctx.fill();
+    }
+    cnt.delete();
+  }
+
+  // ----- Draw quadrant lines, labels and counts (black lines + labels A/B/C/D) -----
+  dctx.strokeStyle = 'black';
+  dctx.lineWidth = Math.max(2, Math.round(OFF_WIDTH / 400));
+  dctx.beginPath();
+  dctx.moveTo(midX, 0); dctx.lineTo(midX, OFF_HEIGHT);
+  dctx.moveTo(0, midY); dctx.lineTo(OFF_WIDTH, midY);
+  dctx.stroke();
+
+  dctx.fillStyle = 'black';
+  dctx.font = `bold ${Math.max(14, Math.round(OFF_WIDTH / 32))}px sans-serif`;
+  // A = top-right, B = bottom-right, C = bottom-left, D = top-left
+  dctx.fillText('A', midX + 10, 24);
+  dctx.fillText('B', midX + 10, midY + 24);
+  dctx.fillText('C', 10, midY + 24);
+  dctx.fillText('D', 10, 24);
+
+  // draw counts in corner of each quadrant
+  function drawCounts(x, y, cars, amb) {
+    dctx.font = `${Math.max(12, Math.round(OFF_WIDTH / 50))}px sans-serif`;
+    dctx.fillStyle = 'green';
+    dctx.fillText(`Cars: ${cars}`, x, y);
+    dctx.fillStyle = 'red';
+    dctx.fillText(`Ambulance: ${amb}`, x, y + 18);
+  }
+  // A (top-right)
+  drawCounts(midX + 10, 48, darkCounts[0], orangeCounts[0]);
+  // B (bottom-right)
+  drawCounts(midX + 10, midY + 48, darkCounts[1], orangeCounts[1]);
+  // C (bottom-left)
+  drawCounts(10, midY + 48, darkCounts[2], orangeCounts[2]);
+  // D (top-left)
+  drawCounts(10, 48, darkCounts[3], orangeCounts[3]);
+
+  // ----- Update stats panel (DOM) -----
+  countDarkEls.A.innerText = darkCounts[0];
+  countDarkEls.B.innerText = darkCounts[1];
+  countDarkEls.C.innerText = darkCounts[2];
+  countDarkEls.D.innerText = darkCounts[3];
+  countOrangeEls.A.innerText = orangeCounts[0];
+  countOrangeEls.B.innerText = orangeCounts[1];
+  countOrangeEls.C.innerText = orangeCounts[2];
+  countOrangeEls.D.innerText = orangeCounts[3];
+
+  // ----- Debounced serial send of 8 numbers -----
+  const combined = [...darkCounts, ...orangeCounts];
+  const changed = combined.some((v, i) => v !== lastSentCounts[i]);
+  if (changed) {
+    desiredCounts = combined.slice();
+    if (!pendingSendTimeout) {
+      appendLog('Scheduling send (debounced)...');
+      pendingSendTimeout = setTimeout(() => {
+        sendCounts(desiredCounts);
+        pendingSendTimeout = null;
+      }, SEND_DEBOUNCE_MS);
+    }
+  }
+
+  // light console log only when values change
+  if (combined.some((v, i) => v !== lastLoggedCounts[i])) {
+    console.log('Counts -> dark:', darkCounts, 'orange:', orangeCounts);
+    lastLoggedCounts = combined.slice();
+  }
+}
+
+// ===== Serial helpers =====
+function appendLog(msg) {
+  const now = new Date().toLocaleTimeString();
+  serialLog.textContent += `[${now}] ${msg}\n`;
+  serialLog.scrollTop = serialLog.scrollHeight;
+  console.log(`[SERIAL] ${msg}`);
+}
+
+async function sendCounts(arr) {
+  if (!writer) {
+    appendLog('TX skipped: serial not connected');
+    lastSentCounts = [...arr]; // avoid repeated scheduling while disconnected
+    return;
+  }
+  const payload = arr.join(',') + '\n';
+  try {
+    await writer.write(new TextEncoder().encode(payload));
+    appendLog('TX: ' + payload.trim());
+    lastSentCounts = [...arr];
+  } catch (err) {
+    appendLog('Write error: ' + err);
+  }
+}
+
+// ===== Web Serial connect/disconnect & read loop =====
+connectSerialBtn.addEventListener('click', async () => {
+  if (!('serial' in navigator)) { alert('Web Serial API not supported. Use Desktop Chrome.'); return; }
+  try {
+    appendLog('Requesting serial port...');
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+    writer = port.writable.getWriter();
+    reader = port.readable.getReader();
+    keepReading = true;
+    readLoop().catch(e => console.warn('readLoop error', e));
+    connectSerialBtn.disabled = true;
+    disconnectSerialBtn.disabled = false;
+    statusDot.classList.replace('red', 'green');
+    statusText.textContent = 'Serial: connected';
+    appendLog('Port opened at 9600');
+  } catch (err) {
+    appendLog('Serial open error: ' + err);
+    console.error(err);
+  }
+});
+
+disconnectSerialBtn.addEventListener('click', async () => {
+  try {
+    appendLog('Disconnecting serial...');
+    keepReading = false;
+    if (reader) { await reader.cancel(); reader.releaseLock(); reader = null; }
+    if (writer) { writer.releaseLock(); writer = null; }
+    if (port) { await port.close(); port = null; }
+    connectSerialBtn.disabled = false;
+    disconnectSerialBtn.disabled = true;
+    statusDot.classList.replace('green', 'red');
+    statusText.textContent = 'Serial: disconnected';
+    appendLog('Port closed');
+  } catch (err) {
+    appendLog('Disconnect error: ' + err);
+  }
+});
+
+async function readLoop() {
+  const dec = new TextDecoder();
+  try {
+    while (keepReading && reader) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        rxBuffer += dec.decode(value);
+        let nl;
+        while ((nl = rxBuffer.indexOf('\n')) !== -1) {
+          let line = rxBuffer.slice(0, nl + 1);
+          rxBuffer = rxBuffer.slice(nl + 1);
+          const trimmed = line.trim();
+          if (trimmed.length === 0) continue;
+          // Only log ACK-like messages (OK / ACK) to avoid spam
+          if (/^\s*(OK|ACK)\b/i.test(trimmed)) {
+            appendLog('RX (ACK): ' + trimmed);
+          } else {
+            // If you'd like to see all incoming lines, uncomment below:
+            // appendLog('RX: ' + trimmed);
+            console.debug('Ignored RX:', trimmed);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    appendLog('Read error: ' + err);
+    console.error(err);
+  }
+}
+
+// ===== Snapshots / UI wiring =====
+snapBtn.addEventListener('click', () => {
+  try {
+    const a = document.createElement('a');
+    a.href = canvasDebug.toDataURL('image/png');
+    a.download = 'debug_' + Date.now() + '.png';
+    a.click();
+  } catch (e) { console.warn('Snapshot failed', e); }
+});
+
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+window.addEventListener('beforeunload', () => { stopCamera(); if (port) try { port.close(); } catch (e) {} });
+
+</script>
+</body>
+</html>

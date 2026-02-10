@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter — Dynamic Camera Aspect (A,B,C,D) - Mobile Landscape</title>
+<style>
+  body { 
+    margin:0; 
+    font-family:system-ui, -apple-system, Roboto, Arial; 
+    background:#071430; 
+    color:#e6eef8; 
+    display:flex; 
+    flex-direction:column; 
+    align-items:center; 
+    padding:10px; 
+  }
+  
+  #stage { 
+    width:100%; 
+    max-width:960px; 
+    background:#071029; 
+    padding:12px; 
+    border-radius:10px; 
+    box-sizing:border-box; 
+  }
+  
+  h2 { 
+    margin:6px 0; 
+    text-align:center; 
+    font-size: clamp(16px, 4vw, 24px);
+  }
+  
+  .buttons { 
+    display:flex; 
+    gap:8px; 
+    margin-bottom:12px; 
+    justify-content:center; 
+    flex-wrap:wrap; 
+  }
+  
+  button { 
+    padding:8px 12px; 
+    border-radius:8px; 
+    border:none; 
+    background:#0f172a; 
+    color:#fff; 
+    font-weight:700; 
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  
+  button:hover:not(:disabled) {
+    background:#1e293b;
+  }
+  
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  
+  button.active {
+    background:#2563eb;
+  }
+  
+  .twocol { 
+    display:flex; 
+    flex-direction:column; 
+    gap:12px; 
+  }
+  
+  canvas { 
+    display:block; 
+    border-radius:8px; 
+    background:#000; 
+    max-width: 100%;
+    height: auto;
+  }
+  
+  .controls { 
+    display:flex; 
+    flex-direction:column; 
+    gap:8px; 
+    margin-top:12px; 
+  }
+  
+  label { 
+    font-size:13px; 
+    color:#9fb0c8; 
+  }
+  
+  input[type=range] { 
+    width:100%; 
+  }
+  
+  .stats { 
+    display:flex; 
+    gap:8px; 
+    margin-top:10px; 
+    justify-content:center; 
+    flex-wrap:wrap; 
+  }
+  
+  .stat { 
+    background:rgba(255,255,255,0.03); 
+    padding:8px 10px; 
+    border-radius:8px; 
+    font-weight:700; 
+    min-width:90px; 
+    text-align:center; 
+    font-size: clamp(12px, 3vw, 14px);
+  }
+  
+  .hint { 
+    font-size:13px; 
+    color:#cfe7ff; 
+    opacity:0.95; 
+    margin-top:8px; 
+    text-align:center; 
+  }
+  
+  .footer { 
+    font-size:12px; 
+    color:#9fb0c8; 
+    margin-top:8px; 
+    text-align:center; 
+  }
+  
+  .orientation-info {
+    background: rgba(37, 99, 235, 0.1);
+    border: 1px solid #2563eb;
+    padding: 8px;
+    border-radius: 6px;
+    margin: 8px 0;
+    font-size: 13px;
+    text-align: center;
+  }
+  
+  video { 
+    display:none; 
+  }
+  
+  /* Mobile-specific styles */
+  @media screen and (max-width: 768px) {
+    body {
+      padding: 5px;
+    }
+    
+    #stage {
+      padding: 8px;
+      border-radius: 8px;
+    }
+    
+    .buttons {
+      gap: 6px;
+    }
+    
+    button {
+      padding: 10px 12px;
+      font-size: 13px;
+    }
+    
+    .controls label {
+      font-size: 12px;
+    }
+    
+    .hint, .footer {
+      font-size: 11px;
+    }
+  }
+  
+  @media screen and (max-width: 768px) and (orientation: portrait) {
+    #stage {
+      max-width: 100%;
+      width: 100%;
+    }
+    
+    .twocol {
+      flex-direction: column;
+    }
+    
+    canvas {
+      width: 100% !important;
+      height: auto !important;
+    }
+    
+    .stats {
+      gap: 6px;
+    }
+    
+    .stat {
+      min-width: 70px;
+      padding: 6px 8px;
+    }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <h2>Block Counter — 4 Quadrants (A,B,C,D)</h2>
+    
+    <div id="orientationInfo" class="orientation-info" style="display:none;">
+      📱 Mobile Portrait Mode: Display rotated to landscape
+    </div>
+
+    <div class="buttons">
+      <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="rotateBtn" style="display:none;">🔄 Toggle Rotation</button>
+      <button id="snapBtn">📸 Save Snapshot</button>
+    </div>
+
+    <video id="video" playsinline autoplay muted></video>
+
+    <div class="twocol">
+      <div>
+        <canvas id="canvasMask"></canvas>
+        <div style="text-align:center;color:#9fb0c8;margin-top:6px">Mask (threshold + morph)</div>
+      </div>
+
+      <div>
+        <canvas id="canvasDebug"></canvas>
+        <div style="text-align:center;color:#9fb0c8;margin-top:6px">Debug overlay (camera + boxes & quadrants)</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>Threshold (brightness): <span id="valThresh">110</span></label>
+      <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+      
+      <label>Gaussian blur kernel (odd): <span id="valBlur">5</span></label>
+      <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+      
+      <label>Morph kernel size: <span id="valMorph">5</span></label>
+      <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+      
+      <label>Min contour area: <span id="valArea">500</span></label>
+      <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+    </div>
+
+    <div class="stats">
+      <div class="stat">A (top-right): <span id="countA">0</span></div>
+      <div class="stat">B (bottom-right): <span id="countB">0</span></div>
+      <div class="stat">C (bottom-left): <span id="countC">0</span></div>
+      <div class="stat">D (top-left): <span id="countD">0</span></div>
+      <div class="stat">Total: <span id="totalCount">0</span></div>
+    </div>
+
+    <div class="hint">Tip: Allow camera permission. On mobile portrait, video automatically rotates to landscape view.</div>
+    <div class="footer">Serving: Open page over HTTPS or localhost. Use <code>python -m http.server</code> if needed.</div>
+  </div>
+
+<!-- OpenCV.js -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+/* Enhanced version with mobile portrait to landscape rotation
+   - Detects mobile portrait mode and automatically rotates to landscape
+   - Maintains proper aspect ratio and quadrant detection
+   - Includes manual rotation toggle option
+*/
+
+// Config: max processing dimension (adjust lower for mobile performance)
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const MAX_PROCESS_DIM = isMobile ? 800 : 1280; // Lower for mobile devices
+
+// Orientation and rotation tracking
+let isMobilePortrait = false;
+let rotationNeeded = false;
+let manualRotation = false;
+
+// DOM elements
+const video = document.getElementById('video');
+const canvasMask = document.getElementById('canvasMask');
+const canvasDebug = document.getElementById('canvasDebug');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const snapBtn = document.getElementById('snapBtn');
+const rotateBtn = document.getElementById('rotateBtn');
+const orientationInfo = document.getElementById('orientationInfo');
+
+const countAEl = document.getElementById('countA');
+const countBEl = document.getElementById('countB');
+const countCEl = document.getElementById('countC');
+const countDEl = document.getElementById('countD');
+const totalCountEl = document.getElementById('totalCount');
+
+const sliderThresh = document.getElementById('sliderThresh');
+const sliderBlur = document.getElementById('sliderBlur');
+const sliderMorph = document.getElementById('sliderMorph');
+const sliderArea = document.getElementById('sliderArea');
+
+const valThresh = document.getElementById('valThresh');
+const valBlur = document.getElementById('valBlur');
+const valMorph = document.getElementById('valMorph');
+const valArea = document.getElementById('valArea');
+
+// Slider event handlers
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { 
+  let v = parseInt(sliderBlur.value); 
+  if (v % 2 === 0) { 
+    sliderBlur.value = v + 1; 
+  } 
+  valBlur.innerText = sliderBlur.value; 
+};
+sliderMorph.oninput = () => { 
+  let v = parseInt(sliderMorph.value); 
+  if (v % 2 === 0) { 
+    sliderMorph.value = v + 1; 
+  } 
+  valMorph.innerText = sliderMorph.value; 
+};
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+// Offscreen capture canvas (will be resized dynamically)
+let OFF_WIDTH = 1280, OFF_HEIGHT = 720;
+const offCanvas = document.createElement('canvas');
+const offCtx = offCanvas.getContext('2d');
+
+// OpenCV mats
+let srcMat, grayMat, blurMat, maskMat, morphMat, contours, hierarchy;
+let intervalId = null;
+let streaming = false;
+let openCvLoaded = false;
+const FPS = isMobile ? 8 : 10; // Lower FPS for mobile
+
+// Check mobile orientation
+function checkMobileOrientation() {
+  const isPortrait = window.innerHeight > window.innerWidth;
+  isMobilePortrait = isMobile && isPortrait;
+  
+  // Auto-rotate for mobile portrait unless manual override
+  if (!manualRotation) {
+    rotationNeeded = isMobilePortrait;
+  }
+  
+  // Update UI
+  if (isMobile) {
+    rotateBtn.style.display = 'inline-block';
+    if (rotationNeeded) {
+      rotateBtn.classList.add('active');
+      if (isMobilePortrait) {
+        orientationInfo.style.display = 'block';
+      }
+    } else {
+      rotateBtn.classList.remove('active');
+      orientationInfo.style.display = 'none';
+    }
+  }
+  
+  return rotationNeeded;
+}
+
+function onOpenCvReady() {
+  console.log('OpenCV.js loaded');
+  openCvLoaded = true;
+  startBtn.disabled = false;
+  startBtn.innerText = 'Start Camera';
+  checkMobileOrientation();
+}
+
+function onOpenCvError() {
+  alert('Failed to load OpenCV.js. Check network or try another browser.');
+  console.error('OpenCV.js failed to load');
+}
+
+// DPR-aware canvas sizing
+function setCanvasSizesDynamic() {
+  const DPR = window.devicePixelRatio || 1;
+  const stage = document.getElementById('stage');
+  const cssMaxWidth = Math.min(stage.clientWidth - 16, 960);
+  const cssWidth = cssMaxWidth;
+  const cssHeight = Math.round(cssWidth * OFF_HEIGHT / OFF_WIDTH);
+
+  // Backing store size
+  canvasMask.width = Math.round(OFF_WIDTH * DPR);
+  canvasMask.height = Math.round(OFF_HEIGHT * DPR);
+  canvasDebug.width = Math.round(OFF_WIDTH * DPR);
+  canvasDebug.height = Math.round(OFF_HEIGHT * DPR);
+
+  // CSS display size
+  canvasMask.style.width = cssWidth + 'px';
+  canvasMask.style.height = cssHeight + 'px';
+  canvasDebug.style.width = cssWidth + 'px';
+  canvasDebug.style.height = cssHeight + 'px';
+
+  // Set transform for DPR
+  const cm = canvasMask.getContext('2d');
+  cm.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const cd = canvasDebug.getContext('2d');
+  cd.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+
+// Start camera with rotation support
+async function startCamera() {
+  if (!openCvLoaded) { 
+    alert('OpenCV not ready'); 
+    return; 
+  }
+  if (streaming) return;
+  
+  try {
+    // Check orientation before starting
+    checkMobileOrientation();
+    
+    // Request camera with appropriate constraints
+    const constraints = {
+      video: {
+        facingMode: 'environment',
+        width: { ideal: rotationNeeded ? 1080 : 1920 },
+        height: { ideal: rotationNeeded ? 1920 : 1080 }
+      },
+      audio: false
+    };
+    
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await video.play();
+
+    // Wait for video dimensions
+    await new Promise(res => setTimeout(res, 200));
+
+    let nativeW = video.videoWidth || 1280;
+    let nativeH = video.videoHeight || 720;
+    console.log('Native camera resolution:', nativeW, 'x', nativeH);
+
+    // If rotation needed, swap dimensions for landscape processing
+    if (rotationNeeded) {
+      [nativeW, nativeH] = [nativeH, nativeW];
+      console.log('Rotated to landscape:', nativeW, 'x', nativeH);
+    }
+
+    // Apply MAX_PROCESS_DIM constraint
+    if (MAX_PROCESS_DIM) {
+      const maxNative = Math.max(nativeW, nativeH);
+      if (maxNative > MAX_PROCESS_DIM) {
+        const scale = MAX_PROCESS_DIM / maxNative;
+        OFF_WIDTH = Math.max(1, Math.round(nativeW * scale));
+        OFF_HEIGHT = Math.max(1, Math.round(nativeH * scale));
+      } else {
+        OFF_WIDTH = nativeW;
+        OFF_HEIGHT = nativeH;
+      }
+    } else {
+      OFF_WIDTH = nativeW;
+      OFF_HEIGHT = nativeH;
+    }
+
+    console.log('Processing dimensions:', OFF_WIDTH, 'x', OFF_HEIGHT);
+
+    // Configure offscreen canvas
+    offCanvas.width = OFF_WIDTH;
+    offCanvas.height = OFF_HEIGHT;
+
+    // Try to set widest zoom if available
+    const [track] = stream.getVideoTracks();
+    if (track && track.getCapabilities) {
+      try {
+        const caps = track.getCapabilities();
+        if ('zoom' in caps && caps.zoom.min !== undefined) {
+          await track.applyConstraints({ 
+            advanced: [{ zoom: caps.zoom.min }] 
+          });
+          console.log('Applied min zoom:', caps.zoom.min);
+        }
+      } catch (err) { 
+        console.warn('Zoom not applied:', err); 
+      }
+    }
+
+    // Update canvas sizes
+    setCanvasSizesDynamic();
+
+    // Create OpenCV mats
+    srcMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC4);
+    grayMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    blurMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    maskMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    morphMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+
+    streaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    intervalId = setInterval(processFrame, 1000 / FPS);
+    
+  } catch (err) {
+    alert('Could not start camera: ' + err.message);
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  
+  streaming = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  
+  clearInterval(intervalId);
+  
+  try {
+    const tracks = video.srcObject.getTracks();
+    tracks.forEach(t => t.stop());
+    video.srcObject = null;
+  } catch (e) {}
+  
+  // Free OpenCV mats
+  try { 
+    srcMat.delete(); 
+    grayMat.delete(); 
+    blurMat.delete(); 
+    maskMat.delete(); 
+    morphMat.delete(); 
+    contours.delete(); 
+    hierarchy.delete(); 
+  } catch(e) {}
+}
+
+// Process frame with rotation support
+function processFrame() {
+  if (!streaming) return;
+
+  // Clear and prepare for drawing
+  offCtx.save();
+  offCtx.clearRect(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  
+  if (rotationNeeded) {
+    // Rotate canvas 90 degrees clockwise for landscape view
+    offCtx.translate(OFF_WIDTH, 0);
+    offCtx.rotate(Math.PI / 2);
+    // Draw video with swapped dimensions
+    offCtx.drawImage(video, 0, 0, OFF_HEIGHT, OFF_WIDTH);
+  } else {
+    // Normal drawing for desktop/landscape
+    offCtx.drawImage(video, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+  }
+  
+  offCtx.restore();
+
+  // Get image data for OpenCV processing
+  const img = offCtx.getImageData(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  srcMat.data.set(img.data);
+
+  // Convert to grayscale
+  cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+
+  // Apply Gaussian blur
+  let ksize = parseInt(sliderBlur.value);
+  if (ksize % 2 === 0) ksize = ksize + 1;
+  if (ksize < 1) ksize = 1;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksize, ksize), 0);
+
+  // Threshold (inverse for dark objects on light background)
+  const thresh = parseInt(sliderThresh.value);
+  cv.threshold(blurMat, maskMat, thresh, 255, cv.THRESH_BINARY_INV);
+
+  // Morphological operations
+  let morphK = parseInt(sliderMorph.value);
+  if (morphK % 2 === 0) morphK = morphK + 1;
+  const M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+  cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, M);
+  cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, M);
+  M.delete();
+
+  // Find contours
+  cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  
+  const boxes = [];
+  const minArea = parseInt(sliderArea.value);
+  
+  for (let i = 0; i < contours.size(); ++i) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    if (area < minArea) { 
+      cnt.delete(); 
+      continue; 
+    }
+    const rect = cv.boundingRect(cnt);
+    const cx = rect.x + Math.round(rect.width / 2);
+    const cy = rect.y + Math.round(rect.height / 2);
+    boxes.push({ rect, area, cx, cy });
+    cnt.delete();
+  }
+
+  // Display mask
+  cv.imshow(canvasMask, morphMat);
+
+  // Draw debug overlay
+  const dctx = canvasDebug.getContext('2d');
+  dctx.clearRect(0, 0, OFF_WIDTH, OFF_HEIGHT);
+  dctx.drawImage(offCanvas, 0, 0, OFF_WIDTH, OFF_HEIGHT, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+
+  // Draw quadrant lines and labels
+  const midX = Math.round(OFF_WIDTH / 2);
+  const midY = Math.round(OFF_HEIGHT / 2);
+  
+  dctx.strokeStyle = 'red';
+  dctx.lineWidth = Math.max(2, Math.round(OFF_WIDTH / 300));
+  dctx.beginPath();
+  dctx.moveTo(midX, 0);
+  dctx.lineTo(midX, OFF_HEIGHT);
+  dctx.moveTo(0, midY);
+  dctx.lineTo(OFF_WIDTH, midY);
+  dctx.stroke();
+
+  // Draw quadrant labels
+  dctx.fillStyle = 'rgba(255, 0, 0, 0.95)';
+  dctx.font = `bold ${Math.max(16, Math.round(OFF_WIDTH / 25))}px sans-serif`;
+  const qHalfW = Math.round(OFF_WIDTH / 4);
+  const qHalfH = Math.round(OFF_HEIGHT / 4);
+  
+  dctx.fillText('A', midX + qHalfW - 15, qHalfH + 15);
+  dctx.fillText('B', midX + qHalfW - 15, midY + qHalfH + 15);
+  dctx.fillText('C', qHalfW - 15, midY + qHalfH + 15);
+  dctx.fillText('D', qHalfW - 15, qHalfH + 15);
+
+  // Draw boxes and count per quadrant
+  dctx.strokeStyle = 'lime';
+  dctx.lineWidth = Math.max(2, Math.round(OFF_WIDTH / 400));
+  dctx.fillStyle = 'yellow';
+  
+  let countA = 0, countB = 0, countC = 0, countD = 0;
+  
+  for (const b of boxes) {
+    dctx.strokeRect(b.rect.x, b.rect.y, b.rect.width, b.rect.height);
+    dctx.beginPath();
+    dctx.arc(b.cx, b.cy, Math.max(4, Math.round(OFF_WIDTH / 150)), 0, Math.PI * 2);
+    dctx.fill();
+
+    // Determine quadrant (origin at top-left)
+    if (b.cx >= midX && b.cy < midY) countA++;
+    else if (b.cx >= midX && b.cy >= midY) countB++;
+    else if (b.cx < midX && b.cy >= midY) countC++;
+    else countD++;
+  }
+
+  // Update count displays
+  countAEl.innerText = countA;
+  countBEl.innerText = countB;
+  countCEl.innerText = countC;
+  countDEl.innerText = countD;
+  totalCountEl.innerText = countA + countB + countC + countD;
+}
+
+// Save snapshots
+snapBtn.addEventListener('click', () => {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    
+    // Save debug image
+    const a = document.createElement('a');
+    a.href = canvasDebug.toDataURL('image/png');
+    a.download = `debug_${timestamp}.png`;
+    a.click();
+
+    // Save mask image
+    setTimeout(() => {
+      const b = document.createElement('a');
+      b.href = canvasMask.toDataURL('image/png');
+      b.download = `mask_${timestamp}.png`;
+      b.click();
+    }, 100);
+    
+  } catch (e) {
+    console.warn('Snapshot failed:', e);
+    alert('Could not save snapshot. Try again.');
+  }
+});
+
+// Manual rotation toggle
+rotateBtn.addEventListener('click', () => {
+  manualRotation = true;
+  rotationNeeded = !rotationNeeded;
+  
+  if (rotationNeeded) {
+    rotateBtn.classList.add('active');
+  } else {
+    rotateBtn.classList.remove('active');
+  }
+  
+  // Restart camera with new rotation setting
+  if (streaming) {
+    stopCamera();
+    setTimeout(() => startCamera(), 300);
+  }
+});
+
+// Event listeners
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+
+// Handle orientation changes
+window.addEventListener('orientationchange', () => {
+  console.log('Orientation changed');
+  const wasRotated = rotationNeeded;
+  
+  // Reset manual override on orientation change
+  manualRotation = false;
+  checkMobileOrientation();
+  
+  if (wasRotated !== rotationNeeded && streaming) {
+    stopCamera();
+    setTimeout(() => startCamera(), 500);
+  }
+});
+
+// Handle window resize
+let resizeTimeout;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {
+    const wasRotated = rotationNeeded;
+    
+    if (!manualRotation) {
+      checkMobileOrientation();
+    }
+    
+    if (wasRotated !== rotationNeeded && streaming) {
+      stopCamera();
+      setTimeout(() => startCamera(), 500);
+    } else if (streaming) {
+      setCanvasSizesDynamic();
+    }
+  }, 250);
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+  stopCamera();
+});
+
+// Initial setup
+window.addEventListener('DOMContentLoaded', () => {
+  checkMobileOrientation();
+});
+</script>
+</body>
+</html>

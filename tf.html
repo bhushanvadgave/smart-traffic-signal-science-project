@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Mobile AI: Left vs Right Traffic Counter</title>
+<style>
+  body { margin:0; font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background:#0f172a; color:#e6eef8; display:flex; flex-direction:column; align-items:center; }
+  #app { width:100%; max-width:900px; padding:10px; box-sizing:border-box; }
+  .topbar { display:flex; gap:8px; justify-content:space-between; align-items:center; margin-bottom:8px; }
+  .controls { display:flex; gap:8px; }
+  button { padding:8px 12px; border-radius:8px; border:none; background:#111827; color:#fff; font-weight:600; }
+  button:active { transform: translateY(1px); }
+  .stage { position:relative; width:100%; background:#000; border-radius:10px; overflow:hidden; display:flex; justify-content:center; align-items:center; }
+  video { width:100%; height:auto; transform:scaleX(-1); /* mirror for selfie camera */ }
+  canvas { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; transform:scaleX(-1); }
+  .overlay-bottom { position:absolute; bottom:8px; left:8px; right:8px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .result { font-size:20px; font-weight:800; padding:8px 12px; border-radius:8px; background:rgba(0,0,0,0.5); }
+  .traffic { display:flex; gap:8px; align-items:center; }
+  .light { width:48px; display:flex; flex-direction:column; gap:6px; padding:6px; border-radius:8px; background:#0b1220; }
+  .bulb { width:32px; height:32px; border-radius:50%; background:#1f2937; box-shadow: inset 0 -2px 6px rgba(0,0,0,0.6); }
+  .bulb.red.on { background:#ff4d4d; box-shadow:0 0 12px rgba(255,77,77,0.6); }
+  .bulb.yellow.on { background:#ffc857; box-shadow:0 0 12px rgba(255,200,87,0.4); }
+  .bulb.green.on { background:#4ce97d; box-shadow:0 0 12px rgba(76,233,125,0.5); }
+  .label { font-size:12px; text-align:center; margin-top:6px; color:#cbd5e1; }
+  .info { margin-top:8px; font-size:13px; color:#cbd5e1; opacity:0.9; }
+  .big-decision { font-size:28px; font-weight:900; color:#fff; padding:8px 14px; border-radius:12px; background:linear-gradient(90deg,#0ea5a9,#7c3aed); }
+  .footer { margin-top:10px; font-size:13px; color:#9fb0c8; text-align:center; }
+  .tiny { font-size:11px; color:#93c5fd; }
+  .controls button.small { padding:6px 8px; font-size:13px; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <div class="topbar">
+      <div class="controls">
+        <button id="startBtn">Start Camera</button>
+        <button id="swapBtn" class="small">Swap Camera</button>
+        <button id="toggleBoxes" class="small">Toggle Boxes</button>
+      </div>
+      <div class="tiny">Model: coco-ssd (tfjs)</div>
+    </div>
+
+    <div class="stage" id="stage">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="overlay"></canvas>
+
+      <div class="overlay-bottom">
+        <div class="result" id="counts">Left: 0 | Right: 0</div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <div class="traffic">
+            <div style="text-align:center;color:#cbd5e1;font-size:12px;margin-right:8px">Left Road</div>
+            <div class="light" id="leftLight">
+              <div class="bulb red" id="left_red"></div>
+              <div class="bulb yellow" id="left_yellow"></div>
+              <div class="bulb green" id="left_green"></div>
+              <div class="label">A</div>
+            </div>
+          </div>
+
+          <div style="width:12px"></div>
+
+          <div class="traffic">
+            <div style="text-align:center;color:#cbd5e1;font-size:12px;margin-right:8px">Right Road</div>
+            <div class="light" id="rightLight">
+              <div class="bulb red" id="right_red"></div>
+              <div class="bulb yellow" id="right_yellow"></div>
+              <div class="bulb green" id="right_green"></div>
+              <div class="label">B</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div style="display:flex;justify-content:center;margin-top:12px;">
+      <div id="decisionBox" class="big-decision">—</div>
+    </div>
+
+    <div class="info">
+      Tip: Use a plain background & steady lighting for best detection. If the default model misses toy cars, place small colored stickers on them.
+    </div>
+    <div class="footer tiny">Open the page in Chrome (Android) or Safari (iOS) and allow camera access. If camera doesn't start, try serving the file via a local web server (e.g. `python -m http.server`) or use HTTPS.</div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+<script>
+(async () => {
+  const video = document.getElementById('video');
+  const overlay = document.getElementById('overlay');
+  const ctx = overlay.getContext('2d');
+  const startBtn = document.getElementById('startBtn');
+  const swapBtn = document.getElementById('swapBtn');
+  const toggleBoxesBtn = document.getElementById('toggleBoxes');
+  const countsEl = document.getElementById('counts');
+  const decisionBox = document.getElementById('decisionBox');
+
+  const leftGreen = document.getElementById('left_green');
+  const leftYellow = document.getElementById('left_yellow');
+  const leftRed = document.getElementById('left_red');
+  const rightGreen = document.getElementById('right_green');
+  const rightYellow = document.getElementById('right_yellow');
+  const rightRed = document.getElementById('right_red');
+
+  let currentStream = null;
+  let useFront = false; // flip camera mirror behavior
+  let showBoxes = true;
+  let model = null;
+  let running = false;
+
+  // smoothing window to avoid flicker
+  const DECISION_WINDOW = 5;
+  const decisionHistory = [];
+
+  // allowed classes considered "vehicles"
+  const VEHICLE_CLASSES = new Set(['car','truck','bus','motorcycle','bicycle','motorbike']);
+
+  // load model
+  decisionBox.innerText = 'Loading model...';
+  model = await cocoSsd.load();
+  decisionBox.innerText = 'Model loaded — press Start';
+
+  // helpers
+  function setTrafficLights(winner) {
+    // reset
+    [leftGreen,leftYellow,leftRed,rightGreen,rightYellow,rightRed].forEach(el => el.classList.remove('on'));
+    if (winner === 'Left') {
+      leftGreen.classList.add('on');
+      rightRed.classList.add('on');
+    } else if (winner === 'Right') {
+      rightGreen.classList.add('on');
+      leftRed.classList.add('on');
+    } else {
+      leftYellow.classList.add('on');
+      rightYellow.classList.add('on');
+    }
+  }
+
+  function decideText(leftCount, rightCount) {
+    if (leftCount > rightCount) return 'Left more';
+    if (rightCount > leftCount) return 'Right more';
+    return 'Same';
+  }
+
+  function smoothDecision(decision) {
+    decisionHistory.push(decision);
+    if (decisionHistory.length > DECISION_WINDOW) decisionHistory.shift();
+    // majority vote
+    const freq = {};
+    decisionHistory.forEach(d => freq[d] = (freq[d]||0) + 1);
+    let best = null, bestc = 0;
+    for (const k in freq) if (freq[k] > bestc) { best = k; bestc = freq[k]; }
+    return best || decision;
+  }
+
+  // start camera with constraints; toggle front/back
+  async function startCamera() {
+    if (currentStream) {
+      // stop existing tracks
+      currentStream.getTracks().forEach(t => t.stop());
+      currentStream = null;
+    }
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: useFront ? 'user' : 'environment',
+        width: { ideal: 640 },
+        height: { ideal: 480 }
+      }
+    };
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      currentStream = stream;
+      video.srcObject = stream;
+      await video.play();
+
+      // resize canvas to video size
+      overlay.width = video.videoWidth || 640;
+      overlay.height = video.videoHeight || 480;
+      running = true;
+      runLoop();
+    } catch (err) {
+      alert('Camera error: ' + err.message + '. Try using HTTPS or a different browser.');
+      console.error(err);
+      running = false;
+    }
+  }
+
+  // main detection loop
+  async function runLoop() {
+    if (!running) return;
+    try {
+      // draw frame on canvas for overlay reference
+      ctx.clearRect(0,0,overlay.width, overlay.height);
+      // perform detection on video element directly
+      const predictions = await model.detect(video, 8); // up to 8 detections per frame for speed
+
+      // draw midline
+      const w = overlay.width;
+      const h = overlay.height;
+      const mid = Math.floor(w/2);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0, 132, 255, 0.8)';
+      ctx.beginPath();
+      ctx.moveTo(mid, 0);
+      ctx.lineTo(mid, h);
+      ctx.stroke();
+
+      // counts
+      let left = 0, right = 0;
+      if (showBoxes) ctx.font = "14px Arial";
+
+      for (const p of predictions) {
+        // only consider vehicle classes, check .class property
+        const cls = (p.class || '').toLowerCase();
+        if (!VEHICLE_CLASSES.has(cls)) continue;
+        const [x,y,wbox,hbox] = p.bbox;
+        const cx = x + wbox/2;
+
+        // count side (cx relative to mid)
+        if (cx < mid) left++; else right++;
+
+        if (showBoxes) {
+          // bounding box
+          ctx.strokeStyle = 'lime';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x, y, wbox, hbox);
+          // label
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillRect(x, y - 20, Math.min(140, wbox+20), 20);
+          ctx.fillStyle = 'white';
+          ctx.fillText(cls + ' ' + Math.round(p.score*100) + '%', x+4, y-4);
+          // center dot
+          ctx.fillStyle = 'red';
+          ctx.beginPath(); ctx.arc(cx, y + hbox/2, 4, 0, Math.PI*2); ctx.fill();
+        }
+      }
+
+      countsEl.innerText = `Left: ${left} | Right: ${right}`;
+
+      // decision + smoothing
+      const raw = decideText(left, right);
+      const smoothed = smoothDecision(raw);
+      decisionBox.innerText = smoothed;
+      // set traffic lights
+      if (smoothed === 'Left more') setTrafficLights('Left');
+      else if (smoothed === 'Right more') setTrafficLights('Right');
+      else setTrafficLights('Same');
+
+    } catch (err) {
+      console.warn('Detection error', err);
+    } finally {
+      requestAnimationFrame(runLoop);
+    }
+  }
+
+  // UI wiring
+  startBtn.addEventListener('click', async () => {
+    if (!running) {
+      await startCamera();
+      startBtn.innerText = 'Stop Camera';
+    } else {
+      // stop
+      running = false;
+      if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+      currentStream = null;
+      video.pause();
+      video.srcObject = null;
+      startBtn.innerText = 'Start Camera';
+      decisionBox.innerText = 'Stopped';
+      countsEl.innerText = 'Left: 0 | Right: 0';
+      setTrafficLights(null);
+    }
+  });
+
+  swapBtn.addEventListener('click', async () => {
+    useFront = !useFront;
+    if (running) {
+      await startCamera(); // restart with swapped facingMode
+    }
+  });
+
+  toggleBoxesBtn.addEventListener('click', () => {
+    showBoxes = !showBoxes;
+    toggleBoxesBtn.innerText = showBoxes ? 'Hide Boxes' : 'Show Boxes';
+  });
+
+})();
+</script>
+</body>
+</html>

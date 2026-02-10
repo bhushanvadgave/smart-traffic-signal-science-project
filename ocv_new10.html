@@ -1,0 +1,813 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Block Counter — Landscape View with Proper Scaling</title>
+<style>
+  * {
+    box-sizing: border-box;
+  }
+  
+  body { 
+    margin: 0; 
+    font-family: system-ui, -apple-system, Roboto, Arial; 
+    background: #071430; 
+    color: #e6eef8; 
+    display: flex; 
+    flex-direction: column; 
+    align-items: center; 
+    padding: 5px; 
+    overflow-x: hidden;
+  }
+  
+  #stage { 
+    width: 100%; 
+    max-width: 100vw; 
+    background: #071029; 
+    padding: 8px; 
+    border-radius: 8px; 
+  }
+  
+  h2 { 
+    margin: 4px 0 8px 0; 
+    text-align: center; 
+    font-size: 18px;
+  }
+  
+  .buttons { 
+    display: flex; 
+    gap: 6px; 
+    margin-bottom: 10px; 
+    justify-content: center; 
+    flex-wrap: wrap; 
+  }
+  
+  button { 
+    padding: 10px 12px; 
+    border-radius: 6px; 
+    border: none; 
+    background: #0f172a; 
+    color: #fff; 
+    font-weight: 600; 
+    cursor: pointer;
+    font-size: 13px;
+    transition: background 0.2s;
+  }
+  
+  button:active:not(:disabled) {
+    background: #1e293b;
+  }
+  
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  
+  button.active {
+    background: #2563eb;
+  }
+  
+  .canvas-container {
+    width: 100%;
+    margin-bottom: 10px;
+    position: relative;
+  }
+  
+  .canvas-wrapper {
+    width: 100%;
+    position: relative;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  
+  canvas { 
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block; 
+    border-radius: 6px; 
+  }
+  
+  .canvas-label {
+    text-align: center;
+    color: #9fb0c8;
+    margin-top: 4px;
+    font-size: 12px;
+  }
+  
+  .controls { 
+    display: flex; 
+    flex-direction: column; 
+    gap: 8px; 
+    margin-top: 10px; 
+  }
+  
+  label { 
+    font-size: 12px; 
+    color: #9fb0c8; 
+  }
+  
+  input[type=range] { 
+    width: 100%; 
+  }
+  
+  .stats { 
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px; 
+    margin-top: 10px; 
+  }
+  
+  .stat { 
+    background: rgba(255,255,255,0.03); 
+    padding: 8px; 
+    border-radius: 6px; 
+    font-weight: 600; 
+    text-align: center; 
+    font-size: 12px;
+  }
+  
+  .stat.total {
+    grid-column: span 2;
+    background: rgba(37, 99, 235, 0.1);
+    border: 1px solid #2563eb;
+  }
+  
+  .hint { 
+    font-size: 11px; 
+    color: #9fb0c8; 
+    margin-top: 8px; 
+    text-align: center; 
+  }
+  
+  .orientation-info {
+    background: rgba(37, 99, 235, 0.15);
+    border: 1px solid #2563eb;
+    padding: 6px;
+    border-radius: 6px;
+    margin: 8px 0;
+    font-size: 12px;
+    text-align: center;
+  }
+  
+  .debug-info {
+    background: rgba(0, 0, 0, 0.5);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-family: monospace;
+    margin-top: 8px;
+    display: none;
+  }
+  
+  .debug-info.show {
+    display: block;
+  }
+  
+  video { 
+    display: none; 
+  }
+  
+  @media screen and (min-width: 769px) {
+    body {
+      padding: 10px;
+    }
+    
+    #stage {
+      max-width: 960px;
+      padding: 12px;
+    }
+    
+    h2 {
+      font-size: 24px;
+      margin: 8px 0 12px 0;
+    }
+    
+    .stats {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    
+    .stat {
+      min-width: 100px;
+      padding: 10px;
+      font-size: 14px;
+    }
+    
+    .stat.total {
+      min-width: 120px;
+    }
+    
+    button {
+      padding: 10px 16px;
+      font-size: 14px;
+    }
+    
+    label {
+      font-size: 13px;
+    }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <h2>Block Counter — 4 Quadrants</h2>
+    
+    <div id="orientationInfo" class="orientation-info" style="display:none;">
+      📱 Landscape view (rotated from portrait camera)
+    </div>
+
+    <div class="buttons">
+      <button id="startBtn" disabled>Waiting for OpenCV...</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="rotateBtn">🔄 Rotation: Auto</button>
+      <button id="snapBtn">📸 Snapshot</button>
+      <button id="debugBtn">🐛 Debug</button>
+    </div>
+
+    <video id="video" playsinline autoplay muted></video>
+
+    <div class="canvas-container">
+      <div class="canvas-wrapper">
+        <canvas id="canvasMask"></canvas>
+      </div>
+      <div class="canvas-label">Mask (threshold + morph)</div>
+    </div>
+
+    <div class="canvas-container">
+      <div class="canvas-wrapper">
+        <canvas id="canvasDebug"></canvas>
+      </div>
+      <div class="canvas-label">Debug overlay (camera + boxes & quadrants)</div>
+    </div>
+
+    <div id="debugInfo" class="debug-info">
+      Video: <span id="videoSize">-</span> | 
+      Canvas: <span id="canvasSize">-</span> | 
+      Mode: <span id="rotateMode">-</span>
+    </div>
+
+    <div class="controls">
+      <label>Threshold: <span id="valThresh">96</span></label>
+      <input id="sliderThresh" type="range" min="0" max="255" value="96" />
+      
+      <label>Blur kernel: <span id="valBlur">5</span></label>
+      <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+      
+      <label>Morph kernel: <span id="valMorph">5</span></label>
+      <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+      
+      <label>Min area: <span id="valArea">500</span></label>
+      <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+    </div>
+
+    <div class="stats">
+      <div class="stat">A (top-right): <span id="countA">0</span></div>
+      <div class="stat">B (bot-right): <span id="countB">0</span></div>
+      <div class="stat">C (bot-left): <span id="countC">0</span></div>
+      <div class="stat">D (top-left): <span id="countD">0</span></div>
+      <div class="stat total">Total: <span id="totalCount">0</span></div>
+    </div>
+
+    <div class="hint">Camera displays in landscape with automatic aspect ratio correction</div>
+  </div>
+
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+// Configuration
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const MAX_PROCESS_DIM = isMobile ? 640 : 1280;
+const FPS = isMobile ? 8 : 10;
+const LANDSCAPE_ASPECT = 16 / 9;
+
+// State variables
+let autoRotate = true;
+let forceRotation = false;
+let streaming = false;
+let openCvLoaded = false;
+let intervalId = null;
+let showDebug = false;
+
+// Canvas dimensions (landscape)
+let CANVAS_WIDTH = 640;
+let CANVAS_HEIGHT = 360;
+
+// Offscreen canvas for processing
+const offCanvas = document.createElement('canvas');
+const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+
+// DOM elements
+const video = document.getElementById('video');
+const canvasMask = document.getElementById('canvasMask');
+const canvasDebug = document.getElementById('canvasDebug');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const snapBtn = document.getElementById('snapBtn');
+const rotateBtn = document.getElementById('rotateBtn');
+const debugBtn = document.getElementById('debugBtn');
+const orientationInfo = document.getElementById('orientationInfo');
+const debugInfo = document.getElementById('debugInfo');
+
+const countAEl = document.getElementById('countA');
+const countBEl = document.getElementById('countB');
+const countCEl = document.getElementById('countC');
+const countDEl = document.getElementById('countD');
+const totalCountEl = document.getElementById('totalCount');
+
+const sliderThresh = document.getElementById('sliderThresh');
+const sliderBlur = document.getElementById('sliderBlur');
+const sliderMorph = document.getElementById('sliderMorph');
+const sliderArea = document.getElementById('sliderArea');
+
+const valThresh = document.getElementById('valThresh');
+const valBlur = document.getElementById('valBlur');
+const valMorph = document.getElementById('valMorph');
+const valArea = document.getElementById('valArea');
+
+// Slider handlers
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { 
+  let v = parseInt(sliderBlur.value); 
+  if (v % 2 === 0) sliderBlur.value = v + 1;
+  valBlur.innerText = sliderBlur.value; 
+};
+sliderMorph.oninput = () => { 
+  let v = parseInt(sliderMorph.value); 
+  if (v % 2 === 0) sliderMorph.value = v + 1;
+  valMorph.innerText = sliderMorph.value; 
+};
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+// OpenCV mats
+let srcMat, grayMat, blurMat, maskMat, morphMat, contours, hierarchy;
+
+// Check if we should rotate
+function shouldRotate() {
+  const isPortrait = window.innerHeight > window.innerWidth;
+  
+  if (!autoRotate) {
+    return forceRotation;
+  }
+  
+  // Auto mode: rotate on mobile portrait
+  return (isMobile && isPortrait);
+}
+
+// Update UI based on rotation state
+function updateRotationUI() {
+  const rotating = shouldRotate();
+  
+  if (rotating) {
+    orientationInfo.style.display = 'block';
+    rotateBtn.classList.add('active');
+  } else {
+    orientationInfo.style.display = 'none';
+    rotateBtn.classList.remove('active');
+  }
+  
+  const modeText = autoRotate ? 'Auto' : (forceRotation ? 'On' : 'Off');
+  rotateBtn.textContent = `🔄 Rotation: ${modeText}`;
+}
+
+// Update debug info
+function updateDebugInfo() {
+  if (video.videoWidth && streaming) {
+    document.getElementById('videoSize').textContent = `${video.videoWidth}x${video.videoHeight}`;
+    document.getElementById('canvasSize').textContent = `${CANVAS_WIDTH}x${CANVAS_HEIGHT}`;
+    document.getElementById('rotateMode').textContent = shouldRotate() ? 'Rotating' : 'Normal';
+  }
+}
+
+function onOpenCvReady() {
+  console.log('OpenCV.js loaded successfully');
+  openCvLoaded = true;
+  startBtn.disabled = false;
+  startBtn.innerText = 'Start Camera';
+  updateRotationUI();
+}
+
+function onOpenCvError() {
+  alert('Failed to load OpenCV.js. Please refresh the page.');
+  console.error('OpenCV.js failed to load');
+  startBtn.innerText = 'OpenCV Load Failed';
+}
+
+// Setup canvas sizes (always landscape)
+function setupCanvases() {
+  const maxWidth = Math.min(window.innerWidth - 20, 960);
+  CANVAS_WIDTH = maxWidth;
+  CANVAS_HEIGHT = Math.round(maxWidth / LANDSCAPE_ASPECT);
+  
+  // Cap to MAX_PROCESS_DIM
+  if (CANVAS_WIDTH > MAX_PROCESS_DIM) {
+    CANVAS_WIDTH = MAX_PROCESS_DIM;
+    CANVAS_HEIGHT = Math.round(MAX_PROCESS_DIM / LANDSCAPE_ASPECT);
+  }
+  
+  console.log(`Canvas size: ${CANVAS_WIDTH}x${CANVAS_HEIGHT}`);
+  
+  // Set canvas internal dimensions
+  canvasMask.width = CANVAS_WIDTH;
+  canvasMask.height = CANVAS_HEIGHT;
+  canvasDebug.width = CANVAS_WIDTH;
+  canvasDebug.height = CANVAS_HEIGHT;
+  
+  // Set offscreen canvas size
+  offCanvas.width = CANVAS_WIDTH;
+  offCanvas.height = CANVAS_HEIGHT;
+}
+
+// Calculate scale for "cover" mode (fill canvas, crop if needed)
+function calculateCoverScale(srcWidth, srcHeight, destWidth, destHeight) {
+  const scaleX = destWidth / srcWidth;
+  const scaleY = destHeight / srcHeight;
+  // Use the larger scale to ensure the entire canvas is filled
+  return Math.max(scaleX, scaleY);
+}
+
+// Draw video with proper scaling (cover mode)
+function drawVideoCover(ctx, video, canvasWidth, canvasHeight, rotate) {
+  ctx.save();
+  
+  if (rotate) {
+    // For rotation: video is portrait, we want landscape
+    // After 90° rotation, video width becomes height and vice versa
+    const scale = calculateCoverScale(video.videoHeight, video.videoWidth, canvasWidth, canvasHeight);
+    
+    // Center the canvas, rotate, then draw scaled
+    ctx.translate(canvasWidth / 2, canvasHeight / 2);
+    ctx.rotate(Math.PI / 2);
+    
+    // After rotation, dimensions are swapped
+    const drawWidth = video.videoWidth * scale;
+    const drawHeight = video.videoHeight * scale;
+    
+    // Center the scaled video
+    ctx.drawImage(video, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+  } else {
+    // No rotation: scale to cover
+    const scale = calculateCoverScale(video.videoWidth, video.videoHeight, canvasWidth, canvasHeight);
+    
+    const drawWidth = video.videoWidth * scale;
+    const drawHeight = video.videoHeight * scale;
+    
+    // Center the scaled video
+    const offsetX = (canvasWidth - drawWidth) / 2;
+    const offsetY = (canvasHeight - drawHeight) / 2;
+    
+    ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
+  }
+  
+  ctx.restore();
+}
+
+async function startCamera() {
+  if (!openCvLoaded) {
+    alert('OpenCV is still loading. Please wait...');
+    return;
+  }
+  if (streaming) return;
+  
+  try {
+    console.log('Starting camera...');
+    updateRotationUI();
+    setupCanvases();
+    
+    // Request camera
+    const constraints = {
+      video: {
+        facingMode: 'environment',
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
+      audio: false
+    };
+    
+    console.log('Requesting camera...');
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    
+    // Wait for video to start
+    await video.play();
+    
+    // Wait for metadata to load
+    await new Promise(resolve => {
+      if (video.videoWidth) {
+        resolve();
+      } else {
+        video.addEventListener('loadedmetadata', resolve, { once: true });
+      }
+    });
+    
+    // Additional wait for mobile
+    if (isMobile) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    console.log(`Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+    
+    if (!video.videoWidth || !video.videoHeight) {
+      throw new Error('Video dimensions not available');
+    }
+    
+    // Create OpenCV mats
+    srcMat = new cv.Mat(CANVAS_HEIGHT, CANVAS_WIDTH, cv.CV_8UC4);
+    grayMat = new cv.Mat(CANVAS_HEIGHT, CANVAS_WIDTH, cv.CV_8UC1);
+    blurMat = new cv.Mat(CANVAS_HEIGHT, CANVAS_WIDTH, cv.CV_8UC1);
+    maskMat = new cv.Mat(CANVAS_HEIGHT, CANVAS_WIDTH, cv.CV_8UC1);
+    morphMat = new cv.Mat(CANVAS_HEIGHT, CANVAS_WIDTH, cv.CV_8UC1);
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    
+    streaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    
+    console.log('Starting frame processing...');
+    intervalId = setInterval(processFrame, 1000 / FPS);
+    
+  } catch (err) {
+    alert('Camera error: ' + err.message);
+    console.error('Camera initialization error:', err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  
+  console.log('Stopping camera...');
+  streaming = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  
+  if (intervalId) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+  
+  try {
+    if (video.srcObject) {
+      const tracks = video.srcObject.getTracks();
+      tracks.forEach(t => t.stop());
+      video.srcObject = null;
+    }
+  } catch (e) {
+    console.error('Error stopping video:', e);
+  }
+  
+  // Free OpenCV resources
+  try {
+    if (srcMat) srcMat.delete();
+    if (grayMat) grayMat.delete();
+    if (blurMat) blurMat.delete();
+    if (maskMat) maskMat.delete();
+    if (morphMat) morphMat.delete();
+    if (contours) contours.delete();
+    if (hierarchy) hierarchy.delete();
+  } catch (e) {
+    console.error('Error freeing OpenCV resources:', e);
+  }
+  
+  // Clear canvases
+  const ctxMask = canvasMask.getContext('2d');
+  const ctxDebug = canvasDebug.getContext('2d');
+  ctxMask.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  ctxDebug.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+}
+
+function processFrame() {
+  if (!streaming || !video.videoWidth) return;
+  
+  try {
+    const rotate = shouldRotate();
+    
+    // Update debug info
+    if (showDebug) {
+      updateDebugInfo();
+    }
+    
+    // Clear offscreen canvas
+    offCtx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    
+    // Draw video with proper scaling (cover mode)
+    drawVideoCover(offCtx, video, CANVAS_WIDTH, CANVAS_HEIGHT, rotate);
+    
+    // Get image data for OpenCV
+    const imageData = offCtx.getImageData(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    srcMat.data.set(imageData.data);
+    
+    // OpenCV processing
+    cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+    
+    // Gaussian blur
+    let ksize = parseInt(sliderBlur.value);
+    if (ksize % 2 === 0) ksize++;
+    cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksize, ksize), 0);
+    
+    // Threshold
+    const thresh = parseInt(sliderThresh.value);
+    cv.threshold(blurMat, maskMat, thresh, 255, cv.THRESH_BINARY_INV);
+    
+    // Morphological operations
+    let morphK = parseInt(sliderMorph.value);
+    if (morphK % 2 === 0) morphK++;
+    const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+    cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, kernel);
+    cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, kernel);
+    kernel.delete();
+    
+    // Find contours
+    cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    
+    const boxes = [];
+    const minArea = parseInt(sliderArea.value);
+    
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      
+      if (area >= minArea) {
+        const rect = cv.boundingRect(cnt);
+        const cx = rect.x + rect.width / 2;
+        const cy = rect.y + rect.height / 2;
+        boxes.push({ rect, cx, cy });
+      }
+      cnt.delete();
+    }
+    
+    // Display mask
+    cv.imshow(canvasMask, morphMat);
+    
+    // Draw debug overlay
+    const ctxDebug = canvasDebug.getContext('2d');
+    
+    // Draw camera feed
+    ctxDebug.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    ctxDebug.drawImage(offCanvas, 0, 0);
+    
+    // Draw quadrant lines
+    const midX = CANVAS_WIDTH / 2;
+    const midY = CANVAS_HEIGHT / 2;
+    
+    ctxDebug.strokeStyle = 'red';
+    ctxDebug.lineWidth = 2;
+    ctxDebug.beginPath();
+    ctxDebug.moveTo(midX, 0);
+    ctxDebug.lineTo(midX, CANVAS_HEIGHT);
+    ctxDebug.moveTo(0, midY);
+    ctxDebug.lineTo(CANVAS_WIDTH, midY);
+    ctxDebug.stroke();
+    
+    // Draw quadrant labels
+    ctxDebug.fillStyle = 'red';
+    ctxDebug.font = 'bold 20px sans-serif';
+    ctxDebug.fillText('D', midX / 2 - 10, midY / 2);
+    ctxDebug.fillText('A', midX + midX / 2 - 10, midY / 2);
+    ctxDebug.fillText('C', midX / 2 - 10, midY + midY / 2);
+    ctxDebug.fillText('B', midX + midX / 2 - 10, midY + midY / 2);
+    
+    // Draw detected boxes
+    ctxDebug.strokeStyle = 'lime';
+    ctxDebug.lineWidth = 2;
+    ctxDebug.fillStyle = 'yellow';
+    
+    let countA = 0, countB = 0, countC = 0, countD = 0;
+    
+    for (const box of boxes) {
+      ctxDebug.strokeRect(box.rect.x, box.rect.y, box.rect.width, box.rect.height);
+      
+      ctxDebug.beginPath();
+      ctxDebug.arc(box.cx, box.cy, 3, 0, Math.PI * 2);
+      ctxDebug.fill();
+      
+      // Determine quadrant
+      if (box.cx >= midX && box.cy < midY) countA++;
+      else if (box.cx >= midX && box.cy >= midY) countB++;
+      else if (box.cx < midX && box.cy >= midY) countC++;
+      else countD++;
+    }
+    
+    // Update counts
+    countAEl.textContent = countA;
+    countBEl.textContent = countB;
+    countCEl.textContent = countC;
+    countDEl.textContent = countD;
+    totalCountEl.textContent = countA + countB + countC + countD;
+    
+  } catch (err) {
+    console.error('Frame processing error:', err);
+  }
+}
+
+// Event handlers
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+
+debugBtn.addEventListener('click', () => {
+  showDebug = !showDebug;
+  debugInfo.classList.toggle('show', showDebug);
+  debugBtn.classList.toggle('active', showDebug);
+});
+
+snapBtn.addEventListener('click', () => {
+  if (!streaming) {
+    alert('Start the camera first');
+    return;
+  }
+  
+  try {
+    const timestamp = Date.now();
+    
+    canvasDebug.toBlob(blob => {
+      if (blob) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `debug_${timestamp}.png`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+    });
+    
+    setTimeout(() => {
+      canvasMask.toBlob(blob => {
+        if (blob) {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `mask_${timestamp}.png`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        }
+      });
+    }, 100);
+    
+  } catch (e) {
+    console.error('Snapshot error:', e);
+    alert('Error saving snapshot');
+  }
+});
+
+// Rotation mode toggle
+rotateBtn.addEventListener('click', () => {
+  if (autoRotate) {
+    autoRotate = false;
+    forceRotation = true;
+  } else if (forceRotation) {
+    forceRotation = false;
+  } else {
+    autoRotate = true;
+  }
+  
+  updateRotationUI();
+  
+  if (streaming) {
+    stopCamera();
+    setTimeout(startCamera, 300);
+  }
+});
+
+// Handle window resize
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    updateRotationUI();
+    if (streaming) {
+      setupCanvases();
+    }
+  }, 250);
+});
+
+// Handle orientation change
+window.addEventListener('orientationchange', () => {
+  updateRotationUI();
+  if (streaming) {
+    stopCamera();
+    setTimeout(startCamera, 500);
+  }
+});
+
+// Cleanup on unload
+window.addEventListener('beforeunload', () => {
+  stopCamera();
+});
+
+// Initial setup
+document.addEventListener('DOMContentLoaded', () => {
+  updateRotationUI();
+  console.log('Page loaded, waiting for OpenCV.js...');
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Web Serial LED Control</title>
+</head>
+<body style="font-family: sans-serif; text-align:center; padding:20px;">
+  <h2>Arduino LED Control (Web Serial)</h2>
+  <button id="connectBtn">🔌 Connect to Arduino</button><br><br>
+  <button onclick="sendCmd('1')">💡 LED ON</button>
+  <button onclick="sendCmd('0')">💤 LED OFF</button>
+  <pre id="log" style="background:#eee; padding:10px; margin-top:20px; height:120px; overflow:auto;"></pre>
+
+<script>
+let port, writer, reader;
+const logEl = document.getElementById('log');
+
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+
+    log("✅ Connected to Arduino Uno");
+
+    writer = port.writable.getWriter();
+    reader = port.readable.getReader();
+
+    readLoop();
+  } catch (err) {
+    log("❌ Error: " + err);
+  }
+});
+
+async function readLoop() {
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value) {
+      log("Arduino: " + new TextDecoder().decode(value));
+    }
+  }
+}
+
+function log(msg) {
+  logEl.textContent += msg + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function sendCmd(cmd) {
+  if (!writer) { log("❌ Not connected"); return; }
+  const data = new TextEncoder().encode(cmd);
+  await writer.write(data);
+  log("Sent: " + cmd);
+}
+</script>
+</body>
+</html>

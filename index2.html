@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AI Traffic Counter</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+</head>
+<body>
+  <h2>AI Traffic Light Demo</h2>
+  <video id="webcam" autoplay playsinline width="640" height="480"></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <p id="result"></p>
+
+  <script>
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const result = document.getElementById('result');
+
+    async function setupCamera() {
+      // Get available video devices to use external webcam
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      console.log('Available cameras:', videoDevices);
+      
+      // Use external webcam if available (usually index 1)
+      const deviceId = videoDevices.length > 1 ? videoDevices[1].deviceId : undefined;
+      
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { deviceId, width: 640, height: 480 } 
+      });
+      video.srcObject = stream;
+      return new Promise(resolve => {
+        video.onloadedmetadata = () => resolve(video);
+      });
+    }
+
+    async function run() {
+      await setupCamera();
+      const model = await cocoSsd.load();
+      console.log("Model loaded!");
+
+      async function detect() {
+        console.log("detecting...");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const predictions = await model.detect(video);
+
+        let left = 0, right = 0;
+        const mid = canvas.width / 2;
+
+        // Draw center dividing line
+        ctx.strokeStyle = "red";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(mid, 0);
+        ctx.lineTo(mid, canvas.height);
+        ctx.stroke();
+        
+        predictions.forEach(pred => {
+          // Detect various objects that could be toy cars
+          const validClasses = ['toy'];
+          
+          if (validClasses.some(cls => pred.class.includes(cls)) || pred.score > 0.3) {
+            const [x, y, w, h] = pred.bbox;
+            
+            // Different colors for left vs right
+            const cx = x + w/2;
+            ctx.strokeStyle = cx < mid ? "blue" : "green";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, w, h);
+            
+            // Add label
+            ctx.fillStyle = ctx.strokeStyle;
+            ctx.font = "12px Arial";
+            ctx.fillText(`${pred.class} (${(pred.score * 100).toFixed(0)}%)`, x, y - 5);
+            
+            console.log(`Detected: ${pred.class} at cx=${cx}, score=${pred.score.toFixed(2)}`);
+            if (cx < mid) left++; else right++;
+          }
+        });
+
+        result.innerText = `Left Section: ${left} objects, Right Section: ${right} objects → ${left > right ? "LEFT has more" : right > left ? "RIGHT has more" : "Equal distribution"}`;
+
+        requestAnimationFrame(detect);
+      }
+      detect();
+    }
+
+    run();
+  </script>
+</body>
+</html>

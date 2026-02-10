@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter — Dark + Orange (Web Serial, Sliders, Debounce)</title>
+<style>
+  body { margin:0; font-family:system-ui, -apple-system, Roboto, Arial;
+         background:#071430; color:#e6eef8; display:flex; flex-direction:column; align-items:center; padding:10px; }
+  #stage { width:100%; max-width:960px; background:#071029; padding:12px; border-radius:10px; box-sizing:border-box; }
+  h2 { margin:6px 0; text-align:center; }
+  .buttons, .serialControls { display:flex; gap:8px; margin-bottom:12px; justify-content:center; flex-wrap:wrap; }
+  button { padding:8px 12px; border-radius:8px; border:none; background:#0f172a; color:#fff; font-weight:700; cursor:pointer; }
+  canvas { display:block; border-radius:8px; background:#000; margin:8px auto; }
+  .controls { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+  label { font-size:13px; color:#9fb0c8; }
+  input[type=range] { width:100%; }
+  .stats { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; justify-content:center; }
+  .stat { background:rgba(255,255,255,0.03); padding:8px 10px; border-radius:8px; font-weight:700; min-width:120px; text-align:center; }
+  #serialLog { background:#031226; color:#9fb0c8; padding:8px; border-radius:8px; height:120px; overflow:auto;
+               font-family:monospace; font-size:12px; margin-top:10px; }
+  .statusDot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .green { background:#2dd4bf; } .red { background:#fb7185; }
+  .hint { font-size:13px; color:#cfe7ff; opacity:0.95; margin-top:8px; text-align:center; }
+  .footer { font-size:12px; color:#9fb0c8; margin-top:8px; text-align:center; }
+  video { display:none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <h2>Block Counter — Dark + Orange Blocks (Quadrants A,B,C,D)</h2>
+
+  <div class="buttons">
+    <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="snapBtn">Save Snapshot</button>
+  </div>
+
+  <div class="serialControls">
+    <button id="connectSerialBtn">Connect to Arduino (Web Serial)</button>
+    <button id="disconnectSerialBtn" disabled>Disconnect</button>
+    <div id="serialStatus" style="display:flex;align-items:center;color:#9fb0c8;">
+      <span id="statusDot" class="statusDot red"></span>
+      <span id="statusText">Serial: disconnected</span>
+    </div>
+  </div>
+
+  <div id="serialLog">TX and ACK messages will appear here...</div>
+
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvasMask"></canvas>
+  <canvas id="canvasDebug"></canvas>
+
+  <div class="controls">
+    <label>Threshold (brightness): <span id="valThresh">110</span></label>
+    <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+    <label>Gaussian blur kernel (odd): <span id="valBlur">5</span></label>
+    <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+    <label>Morph kernel size: <span id="valMorph">5</span></label>
+    <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+    <label>Min contour area: <span id="valArea">500</span></label>
+    <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+  </div>
+
+  <div class="stats">
+    <div class="stat">Dark A: <span id="countDarkA">0</span></div>
+    <div class="stat">Dark B: <span id="countDarkB">0</span></div>
+    <div class="stat">Dark C: <span id="countDarkC">0</span></div>
+    <div class="stat">Dark D: <span id="countDarkD">0</span></div>
+    <div class="stat">Orange A: <span id="countOrangeA">0</span></div>
+    <div class="stat">Orange B: <span id="countOrangeB">0</span></div>
+    <div class="stat">Orange C: <span id="countOrangeC">0</span></div>
+    <div class="stat">Orange D: <span id="countOrangeD">0</span></div>
+  </div>
+
+  <div class="hint">Dark = grayscale threshold, Orange = HSV filter. White background recommended.</div>
+  <div class="footer">Serve over HTTPS or localhost. Web Serial requires Desktop Chrome.</div>
+</div>
+
+<!-- OpenCV.js -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js"
+        onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+// ==== CONFIG ====
+// const ORANGE_LOWER = [5,120,120];   // HSV lower bound for orange
+// const ORANGE_UPPER = [25,255,255];  // HSV upper bound
+
+// NEW — include 4th value to satisfy Scalar requirement
+const ORANGE_LOWER = [5, 120, 120, 0];    // H, S, V, (alpha/unused)
+const ORANGE_UPPER = [25, 255, 255, 255]; // H, S, V, (alpha/unused)
+
+const SEND_DEBOUNCE_MS = 300;
+let OFF_WIDTH=1280, OFF_HEIGHT=720;
+
+// ==== DOM ====
+const video=document.getElementById('video'),
+      canvasMask=document.getElementById('canvasMask'),
+      canvasDebug=document.getElementById('canvasDebug'),
+      startBtn=document.getElementById('startBtn'),
+      stopBtn=document.getElementById('stopBtn'),
+      snapBtn=document.getElementById('snapBtn'),
+      connectSerialBtn=document.getElementById('connectSerialBtn'),
+      disconnectSerialBtn=document.getElementById('disconnectSerialBtn'),
+      serialLog=document.getElementById('serialLog'),
+      statusDot=document.getElementById('statusDot'),
+      statusText=document.getElementById('statusText');
+
+const countDarkEls={A:countDarkA,B:countDarkB,C:countDarkC,D:countDarkD};
+const countOrangeEls={A:countOrangeA,B:countOrangeB,C:countOrangeC,D:countOrangeD};
+
+// ==== Sliders ====
+sliderThresh.oninput=()=>valThresh.innerText=sliderThresh.value;
+sliderBlur.oninput=()=>{if(sliderBlur.value%2==0)sliderBlur.value++;valBlur.innerText=sliderBlur.value;}
+sliderMorph.oninput=()=>{if(sliderMorph.value%2==0)sliderMorph.value++;valMorph.innerText=sliderMorph.value;}
+sliderArea.oninput=()=>valArea.innerText=sliderArea.value;
+
+// ==== OpenCV mats ====
+let srcMat,grayMat,blurMat,maskMat,morphMat,hsvMat,orangeMask,orangeMorph,contours,hierarchy;
+let streaming=false,intervalId=null,openCvLoaded=false;
+
+// ==== Serial state ====
+let port=null,writer=null,reader=null,keepReading=false;
+let rxBuffer='',lastSentCounts=Array(8).fill(-1),desiredCounts=Array(8).fill(-1),pendingSendTimeout=null;
+
+// ==== OpenCV ====
+function onOpenCvReady(){openCvLoaded=true;startBtn.disabled=false;}
+function onOpenCvError(){alert('Failed to load OpenCV');}
+
+async function startCamera(){
+  if(!openCvLoaded) return;
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
+    video.srcObject=stream;await video.play();await new Promise(r=>setTimeout(r,200));
+    OFF_WIDTH=video.videoWidth;OFF_HEIGHT=video.videoHeight;
+    srcMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC4);
+    grayMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);
+    blurMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);
+    maskMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);
+    morphMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);
+    hsvMat=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC3);
+    orangeMask=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);
+    orangeMorph=new cv.Mat(OFF_HEIGHT,OFF_WIDTH,cv.CV_8UC1);
+    contours=new cv.MatVector();hierarchy=new cv.Mat();
+    canvasMask.width=canvasDebug.width=OFF_WIDTH;
+    canvasMask.height=canvasDebug.height=OFF_HEIGHT;
+    streaming=true;startBtn.disabled=true;stopBtn.disabled=false;
+    intervalId=setInterval(processFrame,100);
+  }catch(e){alert('Camera error: '+e);}
+}
+function stopCamera(){if(!streaming)return;streaming=false;clearInterval(intervalId);
+  video.srcObject.getTracks().forEach(t=>t.stop());}
+
+// ==== Frame processing ====
+function processFrame(){
+  if(!streaming) return;
+  const dctx=canvasDebug.getContext('2d');
+  dctx.drawImage(video,0,0,OFF_WIDTH,OFF_HEIGHT);
+  const img=dctx.getImageData(0,0,OFF_WIDTH,OFF_HEIGHT);
+  srcMat.data.set(img.data);
+
+  // Dark pipeline
+  cv.cvtColor(srcMat,grayMat,cv.COLOR_RGBA2GRAY);
+  let k=parseInt(sliderBlur.value);if(k%2==0)k++;
+  cv.GaussianBlur(grayMat,blurMat,new cv.Size(k,k),0);
+  cv.threshold(blurMat,maskMat,parseInt(sliderThresh.value),255,cv.THRESH_BINARY_INV);
+  let mk=parseInt(sliderMorph.value);if(mk%2==0)mk++;
+  let M=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(mk,mk));
+  cv.morphologyEx(maskMat,morphMat,cv.MORPH_OPEN,M);
+  cv.morphologyEx(morphMat,morphMat,cv.MORPH_CLOSE,M);
+  cv.imshow(canvasMask,morphMat);
+
+  // Orange pipeline
+  cv.cvtColor(srcMat,hsvMat,cv.COLOR_RGBA2RGB);
+  cv.cvtColor(hsvMat,hsvMat,cv.COLOR_RGB2HSV);
+  let low=new cv.Mat(hsvMat.rows,hsvMat.cols,hsvMat.type(),ORANGE_LOWER);
+  let high=new cv.Mat(hsvMat.rows,hsvMat.cols,hsvMat.type(),ORANGE_UPPER);
+  cv.inRange(hsvMat,low,high,orangeMask);low.delete();high.delete();
+  cv.morphologyEx(orangeMask,orangeMorph,cv.MORPH_OPEN,M);
+  cv.morphologyEx(orangeMorph,orangeMorph,cv.MORPH_CLOSE,M);
+
+  const midX=OFF_WIDTH/2,midY=OFF_HEIGHT/2;
+  let darkCounts=[0,0,0,0],orangeCounts=[0,0,0,0];
+
+  // Dark contours
+  cv.findContours(morphMat,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+  for(let i=0;i<contours.size();i++){let cnt=contours.get(i);let area=cv.contourArea(cnt);
+    if(area>=parseInt(sliderArea.value)){let r=cv.boundingRect(cnt);let cx=r.x+r.width/2,cy=r.y+r.height/2;
+      if(cx>=midX&&cy<midY)darkCounts[0]++;else if(cx>=midX&&cy>=midY)darkCounts[1]++;
+      else if(cx<midX&&cy>=midY)darkCounts[2]++;else darkCounts[3]++;
+      dctx.strokeStyle='lime';dctx.lineWidth=2;dctx.strokeRect(r.x,r.y,r.width,r.height);}
+    cnt.delete();}
+  // Orange contours
+  cv.findContours(orangeMorph,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+  for(let i=0;i<contours.size();i++){let cnt=contours.get(i);let area=cv.contourArea(cnt);
+    if(area>=parseInt(sliderArea.value)){let r=cv.boundingRect(cnt);let cx=r.x+r.width/2,cy=r.y+r.height/2;
+      if(cx>=midX&&cy<midY)orangeCounts[0]++;else if(cx>=midX&&cy>=midY)orangeCounts[1]++;
+      else if(cx<midX&&cy>=midY)orangeCounts[2]++;else orangeCounts[3]++;
+      dctx.strokeStyle='red';dctx.lineWidth=4;dctx.strokeRect(r.x,r.y,r.width,r.height);}
+    cnt.delete();}
+
+  // Update UI
+  [countDarkEls.A,countDarkEls.B,countDarkEls.C,countDarkEls.D]
+    .forEach((el,i)=>el.innerText=darkCounts[i]);
+  [countOrangeEls.A,countOrangeEls.B,countOrangeEls.C,countOrangeEls.D]
+    .forEach((el,i)=>el.innerText=orangeCounts[i]);
+
+  // Debounce send
+  let combined=[...darkCounts,...orangeCounts];
+  if(combined.some((v,i)=>v!==lastSentCounts[i])){
+    desiredCounts=combined;
+    if(!pendingSendTimeout){
+      pendingSendTimeout=setTimeout(()=>{sendCounts(desiredCounts);pendingSendTimeout=null;},SEND_DEBOUNCE_MS);
+    }
+  }
+}
+
+// ==== Serial ====
+async function sendCounts(arr){
+  if(!writer){appendLog('TX skipped');lastSentCounts=[...arr];return;}
+  let payload=arr.join(',')+'\n';
+  try{await writer.write(new TextEncoder().encode(payload));
+      appendLog('TX: '+payload.trim());lastSentCounts=[...arr];}
+  catch(e){appendLog('Write error: '+e);}
+}
+function appendLog(msg){let now=new Date().toLocaleTimeString();
+  serialLog.textContent+=`[${now}] ${msg}\n`;serialLog.scrollTop=serialLog.scrollHeight;}
+
+connectSerialBtn.onclick=async()=>{
+  if(!('serial'in navigator)){alert('Web Serial not supported');return;}
+  try{port=await navigator.serial.requestPort();await port.open({baudRate:9600});
+    writer=port.writable.getWriter();reader=port.readable.getReader();keepReading=true;readLoop();
+    connectSerialBtn.disabled=true;disconnectSerialBtn.disabled=false;
+    statusDot.classList.replace('red','green');statusText.textContent='Serial: connected';
+    appendLog('Port opened');}catch(e){appendLog('Serial error: '+e);}
+};
+disconnectSerialBtn.onclick=async()=>{keepReading=false;if(reader){await reader.cancel();reader.releaseLock();}
+  if(writer){writer.releaseLock();}if(port){await port.close();}
+  connectSerialBtn.disabled=false;disconnectSerialBtn.disabled=true;
+  statusDot.classList.replace('green','red');statusText.textContent='Serial: disconnected';appendLog('Port closed');};
+async function readLoop(){const dec=new TextDecoder();
+  while(keepReading&&reader){const {value,done}=await reader.read();if(done)break;if(value){
+    rxBuffer+=dec.decode(value);let idx;while((idx=rxBuffer.indexOf('\n'))!==-1){
+      let line=rxBuffer.slice(0,idx+1);rxBuffer=rxBuffer.slice(idx+1);let t=line.trim();
+      if(t.length>0)appendLog('RX: '+t);}}}}
+
+snapBtn.onclick=()=>{let a=document.createElement('a');a.href=canvasDebug.toDataURL('image/png');a.download='debug.png';a.click();};
+
+startBtn.onclick=startCamera;stopBtn.onclick=stopCamera;
+window.addEventListener('beforeunload',()=>{stopCamera();if(port)try{port.close();}catch(e){}});
+</script>
+</body>
+</html>

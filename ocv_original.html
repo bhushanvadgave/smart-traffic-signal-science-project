@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter (OpenCV.js) — Fixed Load</title>
+<style>
+  body { margin:0; font-family:system-ui, -apple-system, Roboto, Arial; background:#0b1220; color:#e6eef8; display:flex; flex-direction:column; align-items:center; padding:8px; }
+  h2 { margin:8px 0 6px; font-size:18px; }
+  #stage { width:100%; max-width:720px; background:#071029; padding:8px; border-radius:10px; box-sizing:border-box; }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+  video, canvas { width:100%; border-radius:8px; background:#000; display:block; }
+  .controls { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+  label { font-size:13px; color:#9fb0c8; }
+  input[type=range] { width:100%; }
+  .stats { display:flex; gap:12px; margin-top:8px; align-items:center; }
+  .stat { background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; font-weight:700; }
+  .decision { margin-top:8px; font-size:20px; font-weight:900; color:#fff; padding:8px 12px; border-radius:8px; background:linear-gradient(90deg,#0ea5a9,#7c3aed); text-align:center; }
+  .tiny { font-size:12px; color:#9fb0c8; margin-top:6px; }
+  .hint { font-size:13px; color:#cfe7ff; opacity:0.9; margin-top:8px; }
+  .buttons { display:flex; gap:8px; margin-bottom:8px; }
+  button { padding:8px 10px; border-radius:8px; border:none; background:#0f172a; color:#fff; font-weight:700; }
+  .twocol { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }
+  .smallcanvas { width:100%; height:auto; border-radius:6px; background:#000; }
+  .footer { font-size:12px; color:#9fb0c8; margin-top:8px; text-align:center; }
+</style>
+</head>
+<body>
+  <h2>Block Counter (OpenCV.js) — Left vs Right (Fixed)</h2>
+  <div id="stage">
+    <div class="buttons">
+      <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="snapBtn">Save Snapshot</button>
+    </div>
+
+    <div style="position:relative;">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="canvasOut" style="position:absolute; left:0; top:0; pointer-events:none;"></canvas>
+    </div>
+
+    <div class="twocol">
+      <div>
+        <canvas id="canvasMask" class="smallcanvas"></canvas>
+        <div class="tiny">Mask (threshold + morph)</div>
+      </div>
+      <div>
+        <canvas id="canvasDebug" class="smallcanvas"></canvas>
+        <div class="tiny">Debug overlay (boxes & centroids)</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>Threshold (brightness): <span id="valThresh">110</span></label>
+      <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+
+      <label>Gaussian blur kernel (odd): <span id="valBlur">5</span></label>
+      <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+
+      <label>Morph kernel size: <span id="valMorph">5</span></label>
+      <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+
+      <label>Min contour area: <span id="valArea">500</span></label>
+      <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+    </div>
+
+    <div class="stats">
+      <div class="stat">Left: <span id="leftCount">0</span></div>
+      <div class="stat">Right: <span id="rightCount">0</span></div>
+      <div class="stat">Total: <span id="totalCount">0</span></div>
+    </div>
+
+    <div id="decisionBox" class="decision">—</div>
+    <div class="hint">Tip: Use a white paper background and keep phone/laptop camera top-down above the scene. Increase threshold if blocks are too light. Use the sliders to tune parameters live.</div>
+    <div class="footer">Serve over HTTPS or from localhost. If camera permission is blocked for local files, run `python -m http.server` and open via your machine's IP.</div>
+  </div>
+
+<!-- Load OpenCV.js with onload handler -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+/* This script waits for OpenCV.js to load (onOpenCvReady) before enabling Start.
+   The earlier ReferenceError was caused by checking `cv` before it exists.
+*/
+
+let video = document.getElementById('video');
+let canvasOut = document.getElementById('canvasOut');
+let canvasMask = document.getElementById('canvasMask');
+let canvasDebug = document.getElementById('canvasDebug');
+let startBtn = document.getElementById('startBtn');
+let stopBtn = document.getElementById('stopBtn');
+let snapBtn = document.getElementById('snapBtn');
+
+let leftCountEl = document.getElementById('leftCount');
+let rightCountEl = document.getElementById('rightCount');
+let totalCountEl = document.getElementById('totalCount');
+let decisionBox = document.getElementById('decisionBox');
+
+let sliderThresh = document.getElementById('sliderThresh');
+let sliderBlur = document.getElementById('sliderBlur');
+let sliderMorph = document.getElementById('sliderMorph');
+let sliderArea = document.getElementById('sliderArea');
+
+let valThresh = document.getElementById('valThresh');
+let valBlur = document.getElementById('valBlur');
+let valMorph = document.getElementById('valMorph');
+let valArea = document.getElementById('valArea');
+
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { let v = parseInt(sliderBlur.value); if (v % 2 == 0) sliderBlur.value = v+1; valBlur.innerText = sliderBlur.value; };
+sliderMorph.oninput = () => { let v = parseInt(sliderMorph.value); if (v % 2 == 0) sliderMorph.value = v+1; valMorph.innerText = sliderMorph.value; };
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+let streaming = false;
+let srcMat, grayMat, blurMat, maskMat, morphMat, hierarchy, contours;
+let FPS = 10; // detection FPS (lower if phone slow)
+let intervalId = null;
+
+// Flag that OpenCV loaded
+let openCvLoaded = false;
+
+function onOpenCvReady() {
+  // This is called when opencv.js script finishes loading.
+  console.log('OpenCV.js loaded.');
+  openCvLoaded = true;
+  startBtn.disabled = false;
+  startBtn.innerText = 'Start Camera';
+}
+
+// Called when the script fails to load
+function onOpenCvError() {
+  alert('Failed to load OpenCV.js. Check network or try a different browser. You may need to serve the file over HTTPS.');
+  console.error('Failed to load OpenCV.js');
+}
+
+// START / STOP camera and processing
+async function startCamera() {
+  if (!openCvLoaded) {
+    alert('OpenCV is not ready yet. Wait a moment and try again.');
+    return;
+  }
+  if (streaming) return;
+  try {
+    const constraints = { video: { facingMode: 'environment', width: { ideal: 800 }, height: { ideal: 600 } }, audio: false };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await video.play();
+
+    // prepare canvases to video size
+    canvasOut.width = video.videoWidth;
+    canvasOut.height = video.videoHeight;
+    canvasMask.width = video.videoWidth;
+    canvasMask.height = video.videoHeight;
+    canvasDebug.width = video.videoWidth;
+    canvasDebug.height = video.videoHeight;
+
+    // init mats
+    srcMat = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+    grayMat = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
+    blurMat = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
+    maskMat = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
+    morphMat = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC1);
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+
+    streaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    intervalId = setInterval(processFrame, 1000 / FPS);
+  } catch (err) {
+    alert('Could not start camera: ' + err.message);
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  streaming = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  clearInterval(intervalId);
+
+  // stop all tracks
+  const tracks = video.srcObject.getTracks();
+  tracks.forEach(t => t.stop());
+  video.srcObject = null;
+
+  // free mats
+  try {
+    srcMat.delete(); grayMat.delete(); blurMat.delete(); maskMat.delete(); morphMat.delete();
+    contours.delete(); hierarchy.delete();
+  } catch (e) {}
+}
+
+function processFrame() {
+  if (!streaming) return;
+  // read frame into srcMat
+  let ctx = canvasOut.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvasOut.width, canvasOut.height);
+  let imageData = ctx.getImageData(0,0,canvasOut.width, canvasOut.height);
+  srcMat.data.set(imageData.data);
+
+  // convert to gray
+  cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+
+  // blur (kernel must be odd)
+  let ksize = parseInt(sliderBlur.value);
+  if (ksize % 2 === 0) ksize = ksize + 1;
+  if (ksize < 1) ksize = 1;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksize, ksize), 0);
+
+  // threshold (we want dark blocks on white background -> binary inverse)
+  let thresh = parseInt(sliderThresh.value);
+  cv.threshold(blurMat, maskMat, thresh, 255, cv.THRESH_BINARY_INV);
+
+  // morphology (open then close)
+  let morphK = parseInt(sliderMorph.value);
+  if (morphK % 2 === 0) morphK = morphK + 1;
+  let M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+  cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, M);
+  cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, M);
+
+  // find contours
+  cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  let boxes = [];
+  let minArea = parseInt(sliderArea.value);
+  for (let i = 0; i < contours.size(); ++i) {
+    let cnt = contours.get(i);
+    let area = cv.contourArea(cnt);
+    if (area < minArea) { cnt.delete(); continue; }
+    let rect = cv.boundingRect(cnt); // {x, y, width, height}
+    let cx = rect.x + Math.round(rect.width / 2);
+    let cy = rect.y + Math.round(rect.height / 2);
+    boxes.push({rect, area, cx, cy});
+    cnt.delete();
+  }
+
+  // draw mask to canvasMask
+  cv.imshow('canvasMask', morphMat);
+
+  // debug overlay: draw boxes on canvasDebug
+  let dctx = canvasDebug.getContext('2d');
+  dctx.clearRect(0,0,canvasDebug.width, canvasDebug.height);
+  dctx.drawImage(canvasOut, 0, 0);
+  dctx.strokeStyle = 'lime';
+  dctx.lineWidth = Math.max(2, Math.round(canvasDebug.width / 300));
+  dctx.fillStyle = 'red';
+
+  // draw midline
+  const mid = Math.round(canvasDebug.width / 2);
+  dctx.beginPath(); dctx.moveTo(mid, 0); dctx.lineTo(mid, canvasDebug.height); dctx.strokeStyle = 'rgba(0,132,255,0.9)'; dctx.lineWidth = 3; dctx.stroke();
+
+  let leftCount = 0, rightCount = 0;
+  for (let b of boxes) {
+    dctx.strokeStyle = 'lime';
+    dctx.lineWidth = 2;
+    dctx.strokeRect(b.rect.x, b.rect.y, b.rect.width, b.rect.height);
+    dctx.fillStyle = 'yellow';
+    dctx.beginPath(); dctx.arc(b.cx, b.cy, 5, 0, Math.PI*2); dctx.fill();
+
+    // label area
+    dctx.fillStyle = 'rgba(0,0,0,0.6)';
+    dctx.fillRect(b.rect.x, Math.max(0, b.rect.y - 22), Math.min(120, b.rect.width + 6), 20);
+    dctx.fillStyle = 'white';
+    dctx.font = '14px sans-serif';
+    dctx.fillText('A:' + b.area, b.rect.x + 4, Math.max(12, b.rect.y - 8));
+
+    if (b.cx < mid) leftCount++; else rightCount++;
+  }
+
+  // update stats
+  leftCountEl.innerText = leftCount;
+  rightCountEl.innerText = rightCount;
+  totalCountEl.innerText = leftCount + rightCount;
+
+  // decision
+  let decision = 'Same';
+  if (leftCount > rightCount) decision = 'Left more';
+  else if (rightCount > leftCount) decision = 'Right more';
+  decisionBox.innerText = decision;
+}
+
+// UI wiring after OpenCV loads
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+snapBtn.addEventListener('click', () => {
+  if (!canvasDebug) return;
+  let a = document.createElement('a');
+  a.href = canvasDebug.toDataURL('image/png');
+  a.download = 'debug_' + Date.now() + '.png';
+  a.click();
+  let b = document.createElement('a');
+  b.href = canvasMask.toDataURL('image/png');
+  b.download = 'mask_' + Date.now() + '.png';
+  b.click();
+});
+
+// cleanup on unload
+window.addEventListener('beforeunload', () => {
+  stopCamera();
+});
+</script>
+</body>
+</html>

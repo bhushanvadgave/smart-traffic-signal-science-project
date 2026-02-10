@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Block Counter — Web Serial (debounce fix)</title>
+<style>
+  body { margin:0; font-family:system-ui, -apple-system, Roboto, Arial; background:#071430; color:#e6eef8; display:flex; flex-direction:column; align-items:center; padding:10px; }
+  #stage { width:100%; max-width:960px; background:#071029; padding:12px; border-radius:10px; box-sizing:border-box; }
+  h2 { margin:6px 0; text-align:center; }
+  .buttons { display:flex; gap:8px; margin-bottom:12px; justify-content:center; flex-wrap:wrap; }
+  button { padding:8px 12px; border-radius:8px; border:none; background:#0f172a; color:#fff; font-weight:700; cursor:pointer; }
+  .twocol { display:flex; flex-direction:column; gap:12px; }
+  canvas { display:block; border-radius:8px; background:#000; }
+  .controls { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+  label { font-size:13px; color:#9fb0c8; }
+  input[type=range] { width:100%; }
+  .stats { display:flex; gap:8px; margin-top:10px; justify-content:center; flex-wrap:wrap; }
+  .stat { background:rgba(255,255,255,0.03); padding:8px 10px; border-radius:8px; font-weight:700; min-width:90px; text-align:center; }
+  .hint { font-size:13px; color:#cfe7ff; opacity:0.95; margin-top:8px; text-align:center; }
+  .footer { font-size:12px; color:#9fb0c8; margin-top:8px; text-align:center; }
+  video { display:none; } /* hidden; used for capture only */
+  #serialLog { background:#031226; color:#9fb0c8; padding:8px; border-radius:8px; height:120px; overflow:auto; font-family:monospace; font-size:12px; margin-top:10px; }
+  .serialControls { display:flex; gap:8px; justify-content:center; margin-top:8px; flex-wrap:wrap; }
+  .statusDot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .green { background: #2dd4bf; }
+  .red { background: #fb7185; }
+  .yellow { background: #f59e0b; }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <h2>Block Counter — 4 Quadrants (A,B,C,D) — Debounce Fix</h2>
+
+    <div class="buttons">
+      <button id="startBtn" disabled>Start Camera (waiting for OpenCV)</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="snapBtn">Save Snapshot</button>
+    </div>
+
+    <div class="serialControls">
+      <button id="connectSerialBtn">Connect to Arduino (Web Serial)</button>
+      <button id="disconnectSerialBtn" disabled>Disconnect</button>
+      <div id="serialStatus" style="display:flex;align-items:center;color:#9fb0c8;">
+        <span id="statusDot" class="statusDot red"></span>
+        <span id="statusText">Serial: disconnected</span>
+      </div>
+    </div>
+
+    <div id="serialLog">TX and ACK messages will appear here...</div>
+
+    <video id="video" playsinline autoplay muted></video>
+
+    <div class="twocol">
+      <div>
+        <canvas id="canvasMask"></canvas>
+        <div style="text-align:center;color:#9fb0c8;margin-top:6px">Mask (threshold + morph)</div>
+      </div>
+
+      <div>
+        <canvas id="canvasDebug"></canvas>
+        <div style="text-align:center;color:#9fb0c8;margin-top:6px">Debug overlay (camera frame + boxes & quadrants)</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>Threshold (brightness): <span id="valThresh">110</span></label>
+      <input id="sliderThresh" type="range" min="0" max="255" value="110" />
+      <label>Gaussian blur kernel (odd): <span id="valBlur">5</span></label>
+      <input id="sliderBlur" type="range" min="1" max="21" step="2" value="5" />
+      <label>Morph kernel size: <span id="valMorph">5</span></label>
+      <input id="sliderMorph" type="range" min="1" max="31" step="2" value="5" />
+      <label>Min contour area: <span id="valArea">500</span></label>
+      <input id="sliderArea" type="range" min="50" max="8000" step="10" value="500" />
+    </div>
+
+    <div class="stats">
+      <div class="stat">A (top-right): <span id="countA">0</span></div>
+      <div class="stat">B (bottom-right): <span id="countB">0</span></div>
+      <div class="stat">C (bottom-left): <span id="countC">0</span></div>
+      <div class="stat">D (top-left): <span id="countD">0</span></div>
+      <div class="stat">Total: <span id="totalCount">0</span></div>
+    </div>
+
+    <div class="hint">Tip: allow camera permission. Use desktop Chrome for Web Serial (Android Chrome usually won't list Uno clones).</div>
+    <div class="footer">Serving: Open page over HTTPS or localhost. Use <code>python -m http.server</code> if needed.</div>
+  </div>
+
+<!-- OpenCV.js -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+
+<script>
+/* Debounce-fix version:
+   - desiredCounts buffer updated every frame when counts change
+   - pendingSendTimeout scheduled only once; subsequent frames don't clear it
+   - when timeout fires it sends the latest desiredCounts
+*/
+
+const MAX_PROCESS_DIM = 1280;
+
+const video = document.getElementById('video');
+const canvasMask = document.getElementById('canvasMask');
+const canvasDebug = document.getElementById('canvasDebug');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const snapBtn = document.getElementById('snapBtn');
+
+const countAEl = document.getElementById('countA');
+const countBEl = document.getElementById('countB');
+const countCEl = document.getElementById('countC');
+const countDEl = document.getElementById('countD');
+const totalCountEl = document.getElementById('totalCount');
+
+const sliderThresh = document.getElementById('sliderThresh');
+const sliderBlur = document.getElementById('sliderBlur');
+const sliderMorph = document.getElementById('sliderMorph');
+const sliderArea = document.getElementById('sliderArea');
+
+const valThresh = document.getElementById('valThresh');
+const valBlur = document.getElementById('valBlur');
+const valMorph = document.getElementById('valMorph');
+const valArea = document.getElementById('valArea');
+
+valThresh.innerText = sliderThresh.value;
+valBlur.innerText = sliderBlur.value;
+valMorph.innerText = sliderMorph.value;
+valArea.innerText = sliderArea.value;
+sliderThresh.oninput = () => valThresh.innerText = sliderThresh.value;
+sliderBlur.oninput = () => { let v=parseInt(sliderBlur.value); if (v%2===0) { sliderBlur.value = v+1; } valBlur.innerText = sliderBlur.value; };
+sliderMorph.oninput = () => { let v=parseInt(sliderMorph.value); if (v%2===0) { sliderMorph.value = v+1; } valMorph.innerText = sliderMorph.value; };
+sliderArea.oninput = () => valArea.innerText = sliderArea.value;
+
+let OFF_WIDTH = 1280, OFF_HEIGHT = 720;
+const offCanvas = document.createElement('canvas');
+const offCtx = offCanvas.getContext('2d');
+
+let srcMat, grayMat, blurMat, maskMat, morphMat, contours, hierarchy;
+let intervalId = null;
+let streaming = false;
+let openCvLoaded = false;
+const FPS = 10;
+
+function onOpenCvReady() {
+  console.log('OpenCV.js loaded');
+  openCvLoaded = true;
+  startBtn.disabled = false;
+  startBtn.innerText = 'Start Camera';
+}
+function onOpenCvError() {
+  alert('Failed to load OpenCV.js. Check network or try another browser.');
+  console.error('OpenCV.js failed to load');
+}
+
+function setCanvasSizesDynamic() {
+  const DPR = window.devicePixelRatio || 1;
+  const stage = document.getElementById('stage');
+  const cssMaxWidth = Math.min(stage.clientWidth - 16, 960);
+  const cssWidth = cssMaxWidth;
+  const cssHeight = Math.round(cssWidth * OFF_HEIGHT / OFF_WIDTH);
+
+  canvasMask.width  = Math.round(OFF_WIDTH * DPR);
+  canvasMask.height = Math.round(OFF_HEIGHT * DPR);
+  canvasDebug.width = Math.round(OFF_WIDTH * DPR);
+  canvasDebug.height = Math.round(OFF_HEIGHT * DPR);
+
+  canvasMask.style.width  = cssWidth + 'px';
+  canvasMask.style.height = cssHeight + 'px';
+  canvasDebug.style.width = cssWidth + 'px';
+  canvasDebug.style.height = cssHeight + 'px';
+
+  const cm = canvasMask.getContext('2d'); cm.setTransform(DPR,0,0,DPR,0,0);
+  const cd = canvasDebug.getContext('2d'); cd.setTransform(DPR,0,0,DPR,0,0);
+}
+
+async function startCamera() {
+  if (!openCvLoaded) { alert('OpenCV not ready'); return; }
+  if (streaming) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    await new Promise(res => setTimeout(res, 150));
+
+    let nativeW = video.videoWidth || OFF_WIDTH;
+    let nativeH = video.videoHeight || OFF_HEIGHT;
+    if (MAX_PROCESS_DIM) {
+      const maxNative = Math.max(nativeW, nativeH);
+      if (maxNative > MAX_PROCESS_DIM) {
+        const scale = MAX_PROCESS_DIM / maxNative;
+        OFF_WIDTH = Math.max(1, Math.round(nativeW * scale));
+        OFF_HEIGHT = Math.max(1, Math.round(nativeH * scale));
+      } else {
+        OFF_WIDTH = nativeW;
+        OFF_HEIGHT = nativeH;
+      }
+    } else {
+      OFF_WIDTH = nativeW;
+      OFF_HEIGHT = nativeH;
+    }
+
+    offCanvas.width = OFF_WIDTH;
+    offCanvas.height = OFF_HEIGHT;
+
+    const [track] = stream.getVideoTracks();
+    if (track && track.getCapabilities) {
+      try {
+        const caps = track.getCapabilities();
+        if ('zoom' in caps) {
+          const minZ = caps.zoom.min !== undefined ? caps.zoom.min : caps.zoom;
+          await track.applyConstraints({ advanced: [{ zoom: minZ }] });
+        }
+      } catch (err) { console.warn('zoom not applied', err); }
+    }
+
+    setCanvasSizesDynamic();
+
+    srcMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC4);
+    grayMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    blurMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    maskMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    morphMat = new cv.Mat(OFF_HEIGHT, OFF_WIDTH, cv.CV_8UC1);
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+
+    streaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    intervalId = setInterval(processFrame, 1000 / FPS);
+  } catch (err) {
+    alert('Could not start camera: ' + err.message);
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  streaming = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  clearInterval(intervalId);
+  try {
+    const tracks = video.srcObject.getTracks();
+    tracks.forEach(t => t.stop());
+    video.srcObject = null;
+  } catch (e) {}
+  try { srcMat.delete(); grayMat.delete(); blurMat.delete(); maskMat.delete(); morphMat.delete(); contours.delete(); hierarchy.delete(); } catch(e){}
+}
+
+/* ---------------------- Web Serial & improved debounce ---------------------- */
+
+const connectSerialBtn = document.getElementById('connectSerialBtn');
+const disconnectSerialBtn = document.getElementById('disconnectSerialBtn');
+const serialLog = document.getElementById('serialLog');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+let port = null;
+let writer = null;
+let reader = null;
+let keepReading = false;
+let rxBuffer = ''; // buffer for incoming bytes -> lines
+let lastSentCounts = [-1,-1,-1,-1]; // last confirmed (sent) counts
+let desiredCounts = [-1,-1,-1,-1];  // latest observed counts to send
+let pendingSendTimeout = null;
+const SEND_DEBOUNCE_MS = 300; // debounce to avoid rapid repeated writes
+const ACK_PATTERNS = [/^\s*OK\b/i, /^\s*ACK\b/i];
+
+function appendLog(msg) {
+  const now = new Date().toLocaleTimeString();
+  serialLog.textContent += `[${now}] ${msg}\n`;
+  serialLog.scrollTop = serialLog.scrollHeight;
+  console.log(`[Serial Log ${now}] ${msg}`);
+}
+function setStatusConnected(connected) {
+  if (connected) {
+    statusDot.classList.remove('red'); statusDot.classList.add('green');
+    statusText.textContent = 'Serial: connected';
+    console.log('Serial status: connected');
+  } else {
+    statusDot.classList.remove('green'); statusDot.classList.add('red');
+    statusText.textContent = 'Serial: disconnected';
+    console.log('Serial status: disconnected');
+  }
+}
+
+connectSerialBtn.addEventListener('click', async () => {
+  if (!('serial' in navigator)) {
+    alert('Web Serial API not supported in this browser. Use desktop Chrome.');
+    console.warn('Web Serial API not supported');
+    return;
+  }
+  try {
+    appendLog('Requesting serial port...');
+    console.log('Requesting serial port via navigator.serial.requestPort()');
+    port = await navigator.serial.requestPort();
+    console.log('Port chosen by user:', port);
+    await port.open({ baudRate: 9600 });
+    writer = port.writable.getWriter();
+    appendLog('Port opened at 9600 baud');
+    console.log('Port opened at 9600');
+
+    keepReading = true;
+    reader = port.readable.getReader();
+    readLoop().catch(e => { console.warn('readLoop error', e); });
+
+    connectSerialBtn.disabled = true;
+    disconnectSerialBtn.disabled = false;
+    setStatusConnected(true);
+  } catch (err) {
+    appendLog('Serial open error: ' + err);
+    console.error('Serial open error:', err);
+  }
+});
+
+disconnectSerialBtn.addEventListener('click', async () => {
+  try {
+    appendLog('Disconnecting serial...');
+    console.log('Disconnect requested');
+    keepReading = false;
+    if (reader) { await reader.cancel(); reader.releaseLock(); reader = null; }
+    if (writer) { writer.releaseLock(); writer = null; }
+    if (port) { await port.close(); port = null; }
+    connectSerialBtn.disabled = false;
+    disconnectSerialBtn.disabled = true;
+    setStatusConnected(false);
+    appendLog('Serial disconnected');
+    console.log('Serial disconnected');
+  } catch (err) {
+    appendLog('Error during disconnect: ' + err);
+    console.error('Error during serial disconnect:', err);
+  }
+});
+
+// read incoming serial and only log ACK lines
+async function readLoop() {
+  const textDecoder = new TextDecoder();
+  try {
+    while (keepReading && reader) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        rxBuffer += textDecoder.decode(value);
+        let nlIndex;
+        while ((nlIndex = rxBuffer.indexOf('\n')) !== -1) {
+          let line = rxBuffer.slice(0, nlIndex + 1);
+          rxBuffer = rxBuffer.slice(nlIndex + 1);
+          const trimmed = line.trim();
+          if (trimmed.length === 0) continue;
+          let isAck = ACK_PATTERNS.some(rx => rx.test(trimmed));
+          if (isAck) {
+            appendLog('RX (ACK): ' + trimmed);
+            console.log('Received ACK line from Arduino:', trimmed);
+          } else {
+            console.debug('RX ignored:', trimmed);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    appendLog('Read error: ' + err);
+    console.error('Read loop error:', err);
+  }
+}
+
+// send newline-terminated payload and update lastSentCounts on success
+async function sendCountsToArduino(a,b,c,d) {
+  if (!writer) {
+    appendLog('TX skipped: serial not connected');
+    console.warn('TX skipped: writer not available');
+    // mark as "sent" to avoid repeated scheduling while disconnected
+    lastSentCounts = [a,b,c,d];
+    return;
+  }
+  const payload = `${a},${b},${c},${d}\n`;
+  try {
+    const data = new TextEncoder().encode(payload);
+    await writer.write(data);
+    appendLog('TX: ' + payload.trim());
+    console.log('TX -> Arduino:', payload.trim());
+    lastSentCounts = [a,b,c,d];
+  } catch (err) {
+    appendLog('Write error: ' + err);
+    console.error('Write error:', err);
+  }
+}
+
+/* ---------------------- CV detection + debounce sending ---------------------- */
+
+let lastDisplayedCounts = [-1,-1,-1,-1];
+
+function processFrame() {
+  if (!streaming) return;
+
+  offCtx.drawImage(video, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+  const img = offCtx.getImageData(0,0,OFF_WIDTH,OFF_HEIGHT);
+  srcMat.data.set(img.data);
+
+  cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+
+  let ksize = parseInt(sliderBlur.value);
+  if (ksize % 2 === 0) ksize = ksize + 1;
+  if (ksize < 1) ksize = 1;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(ksize, ksize), 0);
+
+  const thresh = parseInt(sliderThresh.value);
+  cv.threshold(blurMat, maskMat, thresh, 255, cv.THRESH_BINARY_INV);
+
+  let morphK = parseInt(sliderMorph.value);
+  if (morphK % 2 === 0) morphK = morphK + 1;
+  const M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(morphK, morphK));
+  cv.morphologyEx(maskMat, morphMat, cv.MORPH_OPEN, M);
+  cv.morphologyEx(morphMat, morphMat, cv.MORPH_CLOSE, M);
+
+  cv.findContours(morphMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  const boxes = [];
+  const minArea = parseInt(sliderArea.value);
+  for (let i=0; i<contours.size(); ++i) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    if (area < minArea) { cnt.delete(); continue; }
+    const rect = cv.boundingRect(cnt);
+    const cx = rect.x + Math.round(rect.width/2);
+    const cy = rect.y + Math.round(rect.height/2);
+    boxes.push({rect, area, cx, cy});
+    cnt.delete();
+  }
+
+  cv.imshow(canvasMask, morphMat);
+
+  const dctx = canvasDebug.getContext('2d');
+  dctx.clearRect(0,0,OFF_WIDTH, OFF_HEIGHT);
+  dctx.drawImage(offCanvas, 0, 0, OFF_WIDTH, OFF_HEIGHT, 0, 0, OFF_WIDTH, OFF_HEIGHT);
+
+  const midX = Math.round(OFF_WIDTH / 2), midY = Math.round(OFF_HEIGHT / 2);
+  dctx.strokeStyle = 'red';
+  dctx.lineWidth = Math.max(2, Math.round(OFF_WIDTH / 300));
+  dctx.beginPath();
+  dctx.moveTo(midX, 0); dctx.lineTo(midX, OFF_HEIGHT);
+  dctx.moveTo(0, midY); dctx.lineTo(OFF_WIDTH, midY);
+  dctx.stroke();
+
+  dctx.fillStyle = 'rgba(255,0,0,0.95)';
+  dctx.font = `bold ${Math.max(12, Math.round(OFF_WIDTH/30))}px sans-serif`;
+  const qHalfW = Math.round(OFF_WIDTH/4), qHalfH = Math.round(OFF_HEIGHT/4);
+  dctx.fillText('A', midX + qHalfW - 12, qHalfH + 12);
+  dctx.fillText('B', midX + qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('C', qHalfW - 12, midY + qHalfH + 12);
+  dctx.fillText('D', qHalfW - 12, qHalfH + 12);
+
+  dctx.strokeStyle = 'lime';
+  dctx.lineWidth = Math.max(1, Math.round(OFF_WIDTH/500));
+  dctx.fillStyle = 'yellow';
+  let countA=0, countB=0, countC=0, countD=0;
+  for (const b of boxes) {
+    dctx.strokeRect(b.rect.x, b.rect.y, b.rect.width, b.rect.height);
+    dctx.beginPath();
+    dctx.arc(b.cx, b.cy, Math.max(3, Math.round(OFF_WIDTH/200)), 0, Math.PI*2);
+    dctx.fill();
+
+    if (b.cx >= midX && b.cy < midY) countA++;
+    else if (b.cx >= midX && b.cy >= midY) countB++;
+    else if (b.cx < midX && b.cy >= midY) countC++;
+    else countD++;
+  }
+
+  if (countA !== lastDisplayedCounts[0]) { countAEl.innerText = countA; lastDisplayedCounts[0] = countA; }
+  if (countB !== lastDisplayedCounts[1]) { countBEl.innerText = countB; lastDisplayedCounts[1] = countB; }
+  if (countC !== lastDisplayedCounts[2]) { countCEl.innerText = countC; lastDisplayedCounts[2] = countC; }
+  if (countD !== lastDisplayedCounts[3]) { countDEl.innerText = countD; lastDisplayedCounts[3] = countD; }
+  totalCountEl.innerText = (countA + countB + countC + countD);
+
+  // --- improved debounce: set desiredCounts and schedule only once ---
+  if (countA !== lastSentCounts[0] || countB !== lastSentCounts[1] || countC !== lastSentCounts[2] || countD !== lastSentCounts[3]) {
+    // update desired counts every frame (latest snapshot)
+    desiredCounts = [countA, countB, countC, countD];
+
+    // if no send is pending, schedule one now
+    if (!pendingSendTimeout) {
+      console.log('Counts changed. Scheduling send in', SEND_DEBOUNCE_MS, 'ms', desiredCounts);
+      appendLog('Counts changed. Scheduling send...');
+      pendingSendTimeout = setTimeout(async () => {
+        console.log('Debounce timeout fired. Sending desiredCounts:', desiredCounts);
+        if (writer) {
+          await sendCountsToArduino(desiredCounts[0], desiredCounts[1], desiredCounts[2], desiredCounts[3]);
+        } else {
+          appendLog('Counts changed but serial not connected. Not sent.');
+          console.warn('Counts changed but serial not connected. Not sent.');
+          // avoid repeated scheduling while disconnected
+          lastSentCounts = [...desiredCounts];
+        }
+        pendingSendTimeout = null;
+      }, SEND_DEBOUNCE_MS);
+    } else {
+      // A send is already pending — we simply updated desiredCounts silently.
+      console.debug('Counts changed but send already pending; desiredCounts updated to', desiredCounts);
+    }
+  }
+}
+
+snapBtn.addEventListener('click', () => {
+  try {
+    const a = document.createElement('a');
+    a.href = canvasDebug.toDataURL('image/png');
+    a.download = 'debug_' + Date.now() + '.png';
+    a.click();
+    const b = document.createElement('a');
+    b.href = canvasMask.toDataURL('image/png');
+    b.download = 'mask_' + Date.now() + '.png';
+    b.click();
+  } catch (e) {
+    console.warn('Snapshot failed', e);
+  }
+});
+
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+
+window.addEventListener('beforeunload', () => {
+  stopCamera();
+  if (port) {
+    try { port.close(); } catch(e) {}
+  }
+});
+</script>
+</body>
+</html>
